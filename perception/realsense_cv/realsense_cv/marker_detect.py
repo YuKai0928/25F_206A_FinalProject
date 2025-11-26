@@ -53,7 +53,7 @@ class ArucoTFBroadcaster(Node):
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('marker_length_m', 0.02)
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
-        self.declare_parameter('marker_frame', 'aruco_marker')
+        self.declare_parameter('marker_frame', 'ar_marker_01')
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
         self.declare_parameter('target_id', -1)
 
