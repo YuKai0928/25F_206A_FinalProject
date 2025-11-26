@@ -266,10 +266,13 @@ class PickAndPlace(Node):
             goal.request.workspace_parameters.header.frame_id = self.base_frame
             goal.request.workspace_parameters.header.stamp = self.get_clock().now().to_msg()
             goal.request.group_name = self.planning_group
-            goal.request.num_planning_attempts = 10
-            goal.request.allowed_planning_time = 5.0
-            goal.request.max_velocity_scaling_factor = 0.1
-            goal.request.max_acceleration_scaling_factor = 0.1
+            goal.request.num_planning_attempts = 20
+            goal.request.allowed_planning_time = 10.0
+            goal.request.max_velocity_scaling_factor = 0.2
+            goal.request.max_acceleration_scaling_factor = 0.2
+
+            # This tells the planner to find IK solutions close to current config
+            goal.request.start_state.is_diff = True
 
             # Position constraint
             pos_constraint = PositionConstraint()
