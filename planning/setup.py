@@ -27,9 +27,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'pick_planner = planning.pick_planner:main',
             'simple_move = planning.simple_move:main',
-            'pick_and_place = planning.pick_and_place_server:main',
+            'pick_and_place = planning.pick_and_place:main',
+            'ik = planning.ik:main',
         ],
     },
 )
