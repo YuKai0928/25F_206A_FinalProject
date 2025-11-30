@@ -53,18 +53,26 @@ class ArucoTFBroadcaster(Node):
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('marker_length_m', 0.02)
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
-        self.declare_parameter('marker_frame', 'ar_marker_01')
+        self.declare_parameter('marker_frame1', 'ar_marker_02')
+        self.declare_parameter('marker_frame2', 'ar_marker_03')
+
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
-        self.declare_parameter('target_id', -1)
+        self.declare_parameter('target_id1', 2)
+        self.declare_parameter('target_id2', 3)
+
 
         img_topic = self.get_parameter('input_image_topic').value
         info_topic = self.get_parameter('camera_info_topic').value
 
         self.marker_length = self.get_parameter('marker_length_m').value
         self.camera_frame = self.get_parameter('camera_frame').value
-        self.marker_frame = self.get_parameter('marker_frame').value
+        self.marker_frame1 = self.get_parameter('marker_frame1').value
+        self.marker_frame2 = self.get_parameter('marker_frame2').value
+
         dict_name = self.get_parameter('aruco_dict').value
-        self.target_id = self.get_parameter('target_id').value
+        self.target_id1 = self.get_parameter('target_id1').value
+        self.target_id2 = self.get_parameter('target_id2').value
+
 
         self.bridge = CvBridge()
 
@@ -77,8 +85,6 @@ class ArucoTFBroadcaster(Node):
         self.image_sub = self.create_subscription(Image, img_topic, self.image_callback, 10)
         self.caminfo_sub = self.create_subscription(CameraInfo, info_topic, self.camera_info_callback, 10)
 
-        # Create detector (OpenCV 4.7+)
-        self.get_logger().info("Using OpenCV 4.7+ ArUcoDetector API")
         self.dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dict_name))
         self.parameters = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.dictionary, self.parameters)
@@ -98,10 +104,10 @@ class ArucoTFBroadcaster(Node):
             self.last_warn_time = now
 
     def image_callback(self, msg: Image):
+        
         if self.camera_matrix is None:
             self.warn_throttled("Waiting for CameraInfo before ArUco detection.")
             return
-
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except CvBridgeError:
@@ -109,9 +115,6 @@ class ArucoTFBroadcaster(Node):
 
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
 
-        #
-        # NEW API (OpenCV >= 4.7)
-        #
         corners, ids, rejected = self.detector.detectMarkers(gray)
 
         if ids is None:
@@ -125,7 +128,9 @@ class ArucoTFBroadcaster(Node):
         ids = ids.flatten()
 
         for i, marker_id in enumerate(ids):
-            if self.target_id >= 0 and marker_id != self.target_id:
+            self.get_logger().info(f"found id {marker_id}")
+            if marker_id != self.target_id1 and marker_id != self.target_id2:
+                
                 continue
 
             rvec = rvecs[i][0]
@@ -138,7 +143,12 @@ class ArucoTFBroadcaster(Node):
             tfmsg = TransformStamped()
             tfmsg.header.stamp = msg.header.stamp
             tfmsg.header.frame_id = self.camera_frame
-            tfmsg.child_frame_id = self.marker_frame
+            if marker_id == self.target_id1:
+                tfmsg.child_frame_id = self.marker_frame1
+            else:
+                tfmsg.child_frame_id = self.marker_frame2
+
+
 
             tfmsg.transform.translation.x = float(tvec[0])
             tfmsg.transform.translation.y = float(tvec[1])
