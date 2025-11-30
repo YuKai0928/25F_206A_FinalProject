@@ -8,7 +8,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
-from planning_interfaces.srv import PickPlaceService
+from planning_interfaces.srv import PickPlaceService, MoveToTarget
 import time
 
 from planning.ik import IKPlanner  
@@ -63,6 +63,14 @@ class PickAndPlace(Node):
             callback_group=self.callback_group
         )
 
+        # Service for move to target
+        self.move_to_target_srv = self.create_service(
+            MoveToTarget,
+            'move_to_target',
+            self.move_to_target_callback,
+            callback_group=self.callback_group
+        )
+
         self.processing = False
 
         self.get_logger().info('Ready! Using IK-based planning')
@@ -70,6 +78,28 @@ class PickAndPlace(Node):
     def joint_state_callback(self, msg):
         """Store latest joint state"""
         self.current_joint_state = msg
+
+    async def move_to_target_callback(self, request, response):
+        """Service callback to move to target position"""
+        if self.processing:
+            response.success = False
+            response.message = "Already processing"
+            return response
+
+        self.processing = True
+
+        try:
+            success = await self.move_to_target(request.target_pose)
+            response.success = success
+            response.message = "Success" if success else "Failed to reach target"
+        except Exception as e:
+            self.get_logger().error(f'Exception in move_to_target: {e}')
+            response.success = False
+            response.message = f"Exception: {str(e)}"
+        finally:
+            self.processing = False
+
+        return response
 
     async def pick_place_callback(self, request, response):
         """Execute pick and place using IK + motion planning"""
@@ -288,6 +318,59 @@ class PickAndPlace(Node):
         approach.pose.position.z = target_pose.pose.position.z + self.approach_distance
         approach.pose.orientation = target_pose.pose.orientation
         return approach
+
+    async def move_to_target(self, target_pose):
+        """Move end effector to target position using IK"""
+        if self.current_joint_state is None:
+            self.get_logger().error('No joint state available')
+            return False
+
+        try:
+            self.get_logger().info('='*60)
+            self.get_logger().info('Moving to target position (IK-based)')
+            self.get_logger().info(f'Target: x={target_pose.pose.position.x:.3f}, '
+                                 f'y={target_pose.pose.position.y:.3f}, '
+                                 f'z={target_pose.pose.position.z:.3f}')
+            self.get_logger().info('='*60)
+
+            # Compute IK for target position
+            self.get_logger().info('Computing IK for target...')
+            ik_result = self.ik_planner.compute_ik(
+                self.current_joint_state,
+                target_pose.pose.position.x,
+                target_pose.pose.position.y,
+                target_pose.pose.position.z,
+                target_pose.pose.orientation.x,
+                target_pose.pose.orientation.y,
+                target_pose.pose.orientation.z,
+                target_pose.pose.orientation.w
+            )
+
+            if ik_result is None:
+                self.get_logger().error('IK failed for target position')
+                return False
+
+            # Plan to joint configuration
+            self.get_logger().info('Planning trajectory...')
+            trajectory = self.ik_planner.plan_to_joints(ik_result)
+            if trajectory is None:
+                self.get_logger().error('Planning failed')
+                return False
+
+            # Execute trajectory
+            self.get_logger().info('Executing trajectory...')
+            success = await self.execute_trajectory(trajectory.joint_trajectory)
+
+            if success:
+                self.get_logger().info('='*60)
+                self.get_logger().info('✅ Move to target complete!')
+                self.get_logger().info('='*60)
+
+            return success
+
+        except Exception as e:
+            self.get_logger().error(f'Exception: {e}')
+            return False
 
 
 def main(args=None):

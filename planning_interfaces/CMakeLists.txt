@@ -13,6 +13,7 @@ find_package(geometry_msgs REQUIRED)
 # Generate interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/PickPlaceService.srv"
+  "srv/MoveToTarget.srv"
   DEPENDENCIES geometry_msgs
 )
 

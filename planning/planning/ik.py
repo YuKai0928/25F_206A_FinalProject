@@ -1,4 +1,5 @@
 import rclpy
+import math
 from rclpy.node import Node
 from moveit_msgs.srv import GetPositionIK, GetMotionPlan
 from moveit_msgs.msg import PositionIKRequest, Constraints, JointConstraint
@@ -19,6 +20,13 @@ class IKPlanner(Node):
                           (self.plan_client, 'plan_kinematic_path')]:
             while not srv.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info(f'Waiting for /{name} service...')
+
+        # ---- Default joint limits for TM12 ----
+        self.default_joint_limits = {
+            # 'joint_2': (math.radians(-70), math.radians(0)),  # Limit joint_2
+            # Add more if needed:
+            # 'joint_1': (math.radians(-180), math.radians(180)),
+        }
 
     def compute_ik(self, current_joint_state, x, y, z,
                    qx=1.0, qy=0.0, qz=0.0, qw=0.0):  # Changed default: gripper pointing down
@@ -59,10 +67,11 @@ class IKPlanner(Node):
         self.get_logger().info('IK solution found.')
         return result.solution.joint_state
 
-    def plan_to_joints(self, target_joint_state):
+    def plan_to_joints(self, target_joint_state, custom_joint_limits=None):
         """
         Plan motion to joint configuration for TM12
         """
+        limits = custom_joint_limits if custom_joint_limits else self.default_joint_limits
         req = GetMotionPlan.Request()
         req.motion_plan_request.group_name = 'tmr_arm'  # Changed
         req.motion_plan_request.allowed_planning_time = 5.0  # Increased
@@ -73,6 +82,28 @@ class IKPlanner(Node):
         # velocity and acceleration scaling
         req.motion_plan_request.max_velocity_scaling_factor = 0.2
         req.motion_plan_request.max_acceleration_scaling_factor = 0.2   
+
+        # Apply joint limits as path constraints
+        if limits:
+            
+            
+            path_constraints = Constraints()
+            
+            for joint_name, (min_pos, max_pos) in limits.items():
+                joint_constraint = JointConstraint()
+                joint_constraint.joint_name = joint_name
+                joint_constraint.position = (min_pos + max_pos) / 2.0
+                joint_constraint.tolerance_above = max_pos - joint_constraint.position
+                joint_constraint.tolerance_below = joint_constraint.position - min_pos
+                joint_constraint.weight = 1.0
+                
+                path_constraints.joint_constraints.append(joint_constraint)
+                
+                self.get_logger().info(
+                    f'Limiting {joint_name}: [{math.degrees(min_pos):.1f}°, {math.degrees(max_pos):.1f}°]'
+                )
+            
+            req.motion_plan_request.path_constraints = path_constraints
 
         goal_constraints = Constraints()
         for name, pos in zip(target_joint_state.name, target_joint_state.position):
