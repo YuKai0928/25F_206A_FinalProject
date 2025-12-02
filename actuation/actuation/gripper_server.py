@@ -1,63 +1,78 @@
 #!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
-from std_srvs.srv import SetBool, Trigger
-import Jetson.GPIO as GPIO
+from std_srvs.srv import SetBool
+import serial
 import time
 
 class GripperController(Node):
     def __init__(self):
         super().__init__('gripper_controller')
         
-        self.declare_parameter('servo_pin', 33)
-        self.declare_parameter('pwm_frequency', 50)
-        self.declare_parameter('open_duty_cycle', 5.0)
-        self.declare_parameter('close_duty_cycle', 10.0)
+        # Parameters
+        self.declare_parameter('serial_port', '/dev/ttyUSB0')
+        self.declare_parameter('baud_rate', 115200)
         self.declare_parameter('grip_delay', 0.5)
         
-        self.servo_pin = self.get_parameter('servo_pin').value
-        self.pwm_freq = self.get_parameter('pwm_frequency').value
-        self.open_duty = self.get_parameter('open_duty_cycle').value
-        self.close_duty = self.get_parameter('close_duty_cycle').value
+        self.serial_port = self.get_parameter('serial_port').value
+        self.baud_rate = self.get_parameter('baud_rate').value
         self.grip_delay = self.get_parameter('grip_delay').value
         
-        GPIO.setmode(GPIO.BOARD)
-        GPIO.setup(self.servo_pin, GPIO.OUT)
+        # Connect to Arduino
+        try:
+            self.serial = serial.Serial(self.serial_port, self.baud_rate, timeout=1)
+            time.sleep(2)  # Wait for Arduino reset
+            
+            if self.serial.in_waiting:
+                ready_msg = self.serial.readline().decode().strip()
+                self.get_logger().info(f'Arduino: {ready_msg}')
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to connect to Arduino: {e}')
+            raise
         
-        self.pwm = GPIO.PWM(self.servo_pin, self.pwm_freq)
-        self.pwm.start(0)
-        
+        # Initialize to open position
         self.open_gripper()
         
-        # Main control service
+        # Create service
         self.gripper_service = self.create_service(
             SetBool,
             '/gripper/control',
             self.gripper_service_callback
         )
         
-        
         self.get_logger().info('=' * 40)
         self.get_logger().info('Gripper Controller Initialized')
-        self.get_logger().info(f'GPIO Pin: {self.servo_pin}')
-        self.get_logger().info(f'Open: {self.open_duty}% | Close: {self.close_duty}%')
-        self.get_logger().info('IMPORTANT: Close keeps PWM active for holding!')
+        self.get_logger().info(f'Serial Port: {self.serial_port}')
         self.get_logger().info('=' * 40)
     
+    def send_command(self, cmd):
+        """Send command to Arduino."""
+        try:
+            self.serial.write(cmd.encode())
+            self.serial.flush()
+            time.sleep(0.1)
+            
+            if self.serial.in_waiting:
+                response = self.serial.readline().decode().strip()
+                self.get_logger().info(f'Arduino: {response}')
+                
+        except Exception as e:
+            self.get_logger().error(f'Serial error: {e}')
+    
     def open_gripper(self):
-        """Open gripper (turns off PWM after movement)."""
+        """Open gripper."""
         self.get_logger().info('Opening gripper...')
-        self.pwm.ChangeDutyCycle(self.open_duty)
+        self.send_command('O')
         time.sleep(self.grip_delay)
-        self.pwm.ChangeDutyCycle(0)  # Turn off (no load when open)
         self.get_logger().info('Gripper opened!')
     
     def close_gripper(self):
-        """Close gripper (keeps PWM active for holding torque)."""
+        """Close gripper."""
         self.get_logger().info('Closing gripper...')
-        self.pwm.ChangeDutyCycle(self.close_duty)
+        self.send_command('C')
         time.sleep(self.grip_delay)
-        # Don't turn off! Keep active holding torque
         self.get_logger().info('Gripper closed!')
     
     def gripper_service_callback(self, request, response):
@@ -82,9 +97,10 @@ class GripperController(Node):
     def shutdown(self):
         """Clean shutdown."""
         self.get_logger().info('Shutting down...')
-        self.pwm.ChangeDutyCycle(0)
-        self.pwm.stop()
-        GPIO.cleanup()
+    
+        # Close serial connection
+        if hasattr(self, 'serial') and self.serial.is_open:
+            self.serial.close()
 
 def main(args=None):
     rclpy.init(args=args)
