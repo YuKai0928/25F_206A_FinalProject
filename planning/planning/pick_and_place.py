@@ -9,7 +9,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from planning_interfaces.srv import PickPlaceService, MoveToTarget
-import time
+from std_srvs.srv import SetBool
 
 from planning.ik import IKPlanner  
 
@@ -54,6 +54,17 @@ class PickAndPlace(Node):
         )
         self.exec_client.wait_for_server()
         self.get_logger().info('Connected to trajectory controller')
+
+        # Gripper service client
+        self.gripper_client = self.create_client(
+            SetBool,
+            '/gripper/control',
+            callback_group=self.callback_group
+        )
+        if not self.gripper_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('Gripper service not available, will continue anyway')
+        else:
+            self.get_logger().info('Connected to gripper controller')
 
         # Service for pick and place
         self.pick_place_srv = self.create_service(
@@ -288,11 +299,15 @@ class PickAndPlace(Node):
                     
             elif job == 'close_gripper':
                 self.get_logger().info('🤏 Closing gripper...')
-                time.sleep(1.0)  # TODO: Implement gripper control
-                
+                if not await self.control_gripper(True):
+                    self.get_logger().error('Failed to close gripper')
+                    return False
+
             elif job == 'open_gripper':
                 self.get_logger().info('✋ Opening gripper...')
-                time.sleep(1.0)  # TODO: Implement gripper control
+                if not await self.control_gripper(False):
+                    self.get_logger().error('Failed to open gripper')
+                    return False
                 
         return True
 
@@ -308,6 +323,26 @@ class PickAndPlace(Node):
 
         result = await goal_handle.get_result_async()
         return result.result.error_code == 0
+
+    async def control_gripper(self, close: bool):
+        """Control gripper: True to close, False to open"""
+        if not self.gripper_client.service_is_ready():
+            self.get_logger().warn('Gripper service not available')
+            return True  # Continue anyway
+
+        request = SetBool.Request()
+        request.data = close
+
+        future = self.gripper_client.call_async(request)
+        response = await future
+
+        if response.success:
+            action = "closed" if close else "opened"
+            self.get_logger().info(f'Gripper {action}: {response.message}')
+            return True
+        else:
+            self.get_logger().error(f'Gripper control failed: {response.message}')
+            return False
 
     def get_approach_pose(self, target_pose):
         """Get approach pose above target"""
