@@ -30,6 +30,7 @@ setup(
             'simple_move = planning.simple_move:main',
             'pick_and_place = planning.pick_and_place:main',
             'ik = planning.ik:main',
+            'camera_tf = planning.camera_static_transform:main',
         ],
     },
 )

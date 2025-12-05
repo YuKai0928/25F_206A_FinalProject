@@ -11,7 +11,7 @@ class GripperController(Node):
         super().__init__('gripper_controller')
         
         # Parameters
-        self.declare_parameter('serial_port', '/dev/ttyUSB0')
+        self.declare_parameter('serial_port', '/dev/ttyCH341USB0')
         self.declare_parameter('baud_rate', 115200)
         self.declare_parameter('grip_delay', 0.5)
         
