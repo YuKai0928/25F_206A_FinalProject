@@ -23,7 +23,7 @@ class PickAndPlace(Node):
         self.declare_parameter('end_effector_link', 'link_6')
         self.declare_parameter('base_frame', 'base')
         self.declare_parameter('approach_distance', 0.1)
-        self.declare_parameter('goal_tolerance', 0.005)  # Joint goal tolerance in radians (default: 0.01 rad ≈ 0.57°)
+        self.declare_parameter('goal_tolerance', 0.01)  # Joint goal tolerance in radians (default: 0.01 rad ≈ 0.57°)
 
         self.planning_group = self.get_parameter('planning_group').value
         self.end_effector_link = self.get_parameter('end_effector_link').value
@@ -277,12 +277,19 @@ class PickAndPlace(Node):
 
     async def execute_job_queue(self, job_queue):
         """Execute all jobs in the queue"""
+        # Track current state through the queue execution
+        current_state = self.current_joint_state
+
         for i, job in enumerate(job_queue):
             self.get_logger().info(f'Executing job {i+1}/{len(job_queue)}...')
 
             if isinstance(job, JointState):
-                # Plan to joint configuration
-                trajectory = self.ik_planner.plan_to_joints(job, goal_tolerance=self.goal_tolerance)
+                # Plan to joint configuration with explicit start state
+                trajectory = self.ik_planner.plan_to_joints(
+                    job,
+                    start_joint_state=current_state,
+                    goal_tolerance=self.goal_tolerance
+                )
                 if trajectory is None:
                     self.get_logger().error('Planning failed')
                     return False
@@ -290,6 +297,9 @@ class PickAndPlace(Node):
                 # Execute trajectory
                 if not await self.execute_trajectory(trajectory.joint_trajectory):
                     return False
+
+                # Update current state to the goal state for next planning
+                current_state = job
 
             elif job == 'close_gripper':
                 self.get_logger().info('🤏 Closing gripper...')
@@ -351,20 +361,30 @@ class PickAndPlace(Node):
     def move_to_pose_two_step(self, start_joint_state, target_pose):
         """
         Move to target pose in two steps to avoid excessive joint 1 rotation:
-        1. Move to target position with intermediate orientation (gripper down)
+        1. Move to target position with current orientation (maintain current orientation)
         2. Adjust to target orientation
 
         Returns: tuple (position_ik_result, final_ik_result) or (None, None) on failure
         """
-        # Step 1: Move to target position with gripper pointing down (default orientation)
-        # This uses qx=1.0, qy=0.0, qz=0.0, qw=0.0 which is the default in compute_ik
-        self.get_logger().info('  → Step 1: Moving to target position with intermediate orientation...')
+        # Step 1: Move to target position while maintaining current end-effector orientation
+        self.get_logger().info('  → Step 1: Moving to target position with current orientation...')
+
+        # Compute current end-effector orientation using FK
+        current_pose = self.ik_planner.compute_fk(start_joint_state)
+        if current_pose is None:
+            self.get_logger().error('FK failed to compute current orientation')
+            return None, None
+
+        # Move to target position with current orientation
         position_ik = self.ik_planner.compute_ik(
             start_joint_state,
             target_pose.pose.position.x,
             target_pose.pose.position.y,
             target_pose.pose.position.z,
-            1.0, 0.0, 0.0, 0.0  # Gripper pointing down (default orientation)
+            current_pose.pose.orientation.x,
+            current_pose.pose.orientation.y,
+            current_pose.pose.orientation.z,
+            current_pose.pose.orientation.w
         )
 
         if position_ik is None:
@@ -415,11 +435,16 @@ class PickAndPlace(Node):
                 self.get_logger().error('IK failed for target position')
                 return False
 
-            # Execute both steps
+            # Execute both steps with explicit start states
+            current_state = self.current_joint_state
             for step_num, ik_result in enumerate([position_ik, final_ik], 1):
                 step_name = "position" if step_num == 1 else "orientation"
                 self.get_logger().info(f'Planning trajectory for {step_name} adjustment...')
-                trajectory = self.ik_planner.plan_to_joints(ik_result, goal_tolerance=self.goal_tolerance)
+                trajectory = self.ik_planner.plan_to_joints(
+                    ik_result,
+                    start_joint_state=current_state,
+                    goal_tolerance=self.goal_tolerance
+                )
                 if trajectory is None:
                     self.get_logger().error(f'Planning failed for {step_name} adjustment')
                     return False
@@ -429,6 +454,9 @@ class PickAndPlace(Node):
                 if not success:
                     self.get_logger().error(f'Execution failed for {step_name} adjustment')
                     return False
+
+                # Update current state for next step
+                current_state = ik_result
 
             self.get_logger().info('='*60)
             self.get_logger().info('✅ Move to target complete!')

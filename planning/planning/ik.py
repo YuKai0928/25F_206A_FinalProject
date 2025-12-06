@@ -1,8 +1,8 @@
 import rclpy
 import math
 from rclpy.node import Node
-from moveit_msgs.srv import GetPositionIK, GetMotionPlan
-from moveit_msgs.msg import PositionIKRequest, Constraints, JointConstraint
+from moveit_msgs.srv import GetPositionIK, GetMotionPlan, GetPositionFK
+from moveit_msgs.msg import PositionIKRequest, Constraints, JointConstraint, RobotState
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Duration
@@ -15,9 +15,11 @@ class IKPlanner(Node):
         # ---- Clients ----
         self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
         self.plan_client = self.create_client(GetMotionPlan, '/plan_kinematic_path')
+        self.fk_client = self.create_client(GetPositionFK, '/compute_fk')
 
         for srv, name in [(self.ik_client, 'compute_ik'),
-                          (self.plan_client, 'plan_kinematic_path')]:
+                          (self.plan_client, 'plan_kinematic_path'),
+                          (self.fk_client, 'compute_fk')]:
             while not srv.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info(f'Waiting for /{name} service...')
 
@@ -67,12 +69,48 @@ class IKPlanner(Node):
         self.get_logger().info('IK solution found.')
         return result.solution.joint_state
 
-    def plan_to_joints(self, target_joint_state, custom_joint_limits=None, goal_tolerance=0.01):
+    def compute_fk(self, joint_state, fk_link_names=['link_6']):
+        """
+        Compute Forward Kinematics for TM12 robot
+
+        Args:
+            joint_state: Current joint configuration
+            fk_link_names: List of link names to compute FK for (default: ['link_6'])
+
+        Returns:
+            PoseStamped of the end-effector, or None if FK fails
+        """
+        fk_req = GetPositionFK.Request()
+        fk_req.header.frame_id = 'base'
+        fk_req.fk_link_names = fk_link_names
+        fk_req.robot_state.joint_state = joint_state
+
+        future = self.fk_client.call_async(fk_req)
+        rclpy.spin_until_future_complete(self, future)
+
+        if future.result() is None:
+            self.get_logger().error('FK service failed.')
+            return None
+
+        result = future.result()
+        if result.error_code.val != result.error_code.SUCCESS:
+            self.get_logger().error(f'FK failed, code: {result.error_code.val}')
+            return None
+
+        if len(result.pose_stamped) == 0:
+            self.get_logger().error('FK returned no poses.')
+            return None
+
+        self.get_logger().info('FK solution found.')
+        return result.pose_stamped[0]  # Return first pose (link_6)
+
+    def plan_to_joints(self, target_joint_state, start_joint_state=None, custom_joint_limits=None, goal_tolerance=0.01):
         """
         Plan motion to joint configuration for TM12
 
         Args:
             target_joint_state: Target joint configuration
+            start_joint_state: Starting joint state (recommended to avoid ambiguity)
             custom_joint_limits: Optional joint limits for path constraints
             goal_tolerance: Goal tolerance in radians (default: 0.01 rad ≈ 0.57°)
                            Smaller = more precise, Larger = more lenient
@@ -83,7 +121,14 @@ class IKPlanner(Node):
         req.motion_plan_request.allowed_planning_time = 5.0  # Increased
         req.motion_plan_request.planner_id = "RRTstarkConfigDefault"  # Better planner
         req.motion_plan_request.num_planning_attempts = 10  # More attempts
-        req.motion_plan_request.start_state.is_diff = True
+
+        # Set explicit start state to avoid planner ambiguity
+        if start_joint_state is not None:
+            req.motion_plan_request.start_state.is_diff = False
+            req.motion_plan_request.start_state.joint_state = start_joint_state
+        else:
+            # Fallback: let planner use current state in planning scene
+            req.motion_plan_request.start_state.is_diff = True
 
         # velocity and acceleration scaling
         req.motion_plan_request.max_velocity_scaling_factor = 0.2
