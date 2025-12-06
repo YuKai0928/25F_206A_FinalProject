@@ -23,11 +23,13 @@ class PickAndPlace(Node):
         self.declare_parameter('end_effector_link', 'link_6')
         self.declare_parameter('base_frame', 'base')
         self.declare_parameter('approach_distance', 0.1)
+        self.declare_parameter('goal_tolerance', 0.005)  # Joint goal tolerance in radians (default: 0.01 rad ≈ 0.57°)
 
         self.planning_group = self.get_parameter('planning_group').value
         self.end_effector_link = self.get_parameter('end_effector_link').value
         self.base_frame = self.get_parameter('base_frame').value
         self.approach_distance = self.get_parameter('approach_distance').value
+        self.goal_tolerance = self.get_parameter('goal_tolerance').value
 
         # Callback group
         self.callback_group = ReentrantCallbackGroup()
@@ -143,36 +145,32 @@ class PickAndPlace(Node):
             # Build job queue
             job_queue = []
 
-            # 1. Compute IK for pick approach
+            # 1. Compute IK for pick approach (two-step: position then orientation)
             self.get_logger().info('Step 1/8: Computing IK for pick approach...')
             pick_approach = self.get_approach_pose(pick_pose)
-            ik_result = self.ik_planner.compute_ik(
+            position_ik, ik_result = self.move_to_pose_two_step(
                 self.current_joint_state,
-                pick_approach.pose.position.x,
-                pick_approach.pose.position.y,
-                pick_approach.pose.position.z,
-                pick_approach.pose.orientation.x,
-                pick_approach.pose.orientation.y,
-                pick_approach.pose.orientation.z,
-                pick_approach.pose.orientation.w
+                pick_approach
             )
             if ik_result is None:
                 response.success = False
                 response.message = "IK failed for pick approach"
                 return response
-            job_queue.append(ik_result)
+            # Add both steps to job queue
+            job_queue.append(position_ik)  # First reach position
+            job_queue.append(ik_result)     # Then adjust orientation
 
-            # 2. Compute IK for pick position
-            self.get_logger().info('Step 2/8: Computing IK for pick...')
+            # 2. Compute IK for pick position (straight down, maintain approach orientation)
+            self.get_logger().info('Step 2/8: Computing IK for pick (descending)...')
             ik_result = self.ik_planner.compute_ik(
                 ik_result,
                 pick_pose.pose.position.x,
                 pick_pose.pose.position.y,
                 pick_pose.pose.position.z,
-                pick_pose.pose.orientation.x,
-                pick_pose.pose.orientation.y,
-                pick_pose.pose.orientation.z,
-                pick_pose.pose.orientation.w
+                pick_approach.pose.orientation.x,  # Maintain approach orientation
+                pick_approach.pose.orientation.y,
+                pick_approach.pose.orientation.z,
+                pick_approach.pose.orientation.w
             )
             if ik_result is None:
                 response.success = False
@@ -183,9 +181,9 @@ class PickAndPlace(Node):
             # 3. Close gripper
             job_queue.append('close_gripper')
 
-            # 4. Retreat
-            self.get_logger().info('Step 4/8: Computing IK for pick retreat...')
-            ik_result = self.ik_planner.compute_ik(
+            # 4. Retreat (straight up)
+            self.get_logger().info('Step 4/8: Computing IK for pick retreat (ascending)...')
+            retreat_ik = self.ik_planner.compute_ik(
                 ik_result,
                 pick_approach.pose.position.x,
                 pick_approach.pose.position.y,
@@ -195,42 +193,38 @@ class PickAndPlace(Node):
                 pick_approach.pose.orientation.z,
                 pick_approach.pose.orientation.w
             )
-            if ik_result is None:
+            if retreat_ik is None:
                 response.success = False
                 response.message = "IK failed for pick retreat"
                 return response
-            job_queue.append(ik_result)
+            job_queue.append(retreat_ik)
 
-            # 5. Place approach
+            # 5. Place approach (two-step: position then orientation)
             self.get_logger().info('Step 5/8: Computing IK for place approach...')
             place_approach = self.get_approach_pose(place_pose)
-            ik_result = self.ik_planner.compute_ik(
+            position_ik, ik_result = self.move_to_pose_two_step(
                 ik_result,
-                place_approach.pose.position.x,
-                place_approach.pose.position.y,
-                place_approach.pose.position.z,
-                place_approach.pose.orientation.x,
-                place_approach.pose.orientation.y,
-                place_approach.pose.orientation.z,
-                place_approach.pose.orientation.w
+                place_approach
             )
             if ik_result is None:
                 response.success = False
                 response.message = "IK failed for place approach"
                 return response
-            job_queue.append(ik_result)
+            # Add both steps to job queue
+            job_queue.append(position_ik)  # First reach position
+            job_queue.append(ik_result)     # Then adjust orientation
 
-            # 6. Place position
-            self.get_logger().info('Step 6/8: Computing IK for place...')
+            # 6. Place position (straight down, maintain approach orientation)
+            self.get_logger().info('Step 6/8: Computing IK for place (descending)...')
             ik_result = self.ik_planner.compute_ik(
                 ik_result,
                 place_pose.pose.position.x,
                 place_pose.pose.position.y,
                 place_pose.pose.position.z,
-                place_pose.pose.orientation.x,
-                place_pose.pose.orientation.y,
-                place_pose.pose.orientation.z,
-                place_pose.pose.orientation.w
+                place_approach.pose.orientation.x,  # Maintain approach orientation
+                place_approach.pose.orientation.y,
+                place_approach.pose.orientation.z,
+                place_approach.pose.orientation.w
             )
             if ik_result is None:
                 response.success = False
@@ -241,9 +235,9 @@ class PickAndPlace(Node):
             # 7. Open gripper
             job_queue.append('open_gripper')
 
-            # 8. Retreat
-            self.get_logger().info('Step 8/8: Computing IK for place retreat...')
-            ik_result = self.ik_planner.compute_ik(
+            # 8. Retreat (straight up)
+            self.get_logger().info('Step 8/8: Computing IK for place retreat (ascending)...')
+            retreat_ik = self.ik_planner.compute_ik(
                 ik_result,
                 place_approach.pose.position.x,
                 place_approach.pose.position.y,
@@ -253,11 +247,11 @@ class PickAndPlace(Node):
                 place_approach.pose.orientation.z,
                 place_approach.pose.orientation.w
             )
-            if ik_result is None:
+            if retreat_ik is None:
                 response.success = False
                 response.message = "IK failed for place retreat"
                 return response
-            job_queue.append(ik_result)
+            job_queue.append(retreat_ik)
 
             # Execute all jobs
             success = await self.execute_job_queue(job_queue)
@@ -285,18 +279,18 @@ class PickAndPlace(Node):
         """Execute all jobs in the queue"""
         for i, job in enumerate(job_queue):
             self.get_logger().info(f'Executing job {i+1}/{len(job_queue)}...')
-            
+
             if isinstance(job, JointState):
                 # Plan to joint configuration
-                trajectory = self.ik_planner.plan_to_joints(job)
+                trajectory = self.ik_planner.plan_to_joints(job, goal_tolerance=self.goal_tolerance)
                 if trajectory is None:
                     self.get_logger().error('Planning failed')
                     return False
-                
+
                 # Execute trajectory
                 if not await self.execute_trajectory(trajectory.joint_trajectory):
                     return False
-                    
+
             elif job == 'close_gripper':
                 self.get_logger().info('🤏 Closing gripper...')
                 if not await self.control_gripper(True):
@@ -308,7 +302,7 @@ class PickAndPlace(Node):
                 if not await self.control_gripper(False):
                     self.get_logger().error('Failed to open gripper')
                     return False
-                
+
         return True
 
     async def execute_trajectory(self, joint_trajectory):
@@ -354,54 +348,93 @@ class PickAndPlace(Node):
         approach.pose.orientation = target_pose.pose.orientation
         return approach
 
+    def move_to_pose_two_step(self, start_joint_state, target_pose):
+        """
+        Move to target pose in two steps to avoid excessive joint 1 rotation:
+        1. Move to target position with intermediate orientation (gripper down)
+        2. Adjust to target orientation
+
+        Returns: tuple (position_ik_result, final_ik_result) or (None, None) on failure
+        """
+        # Step 1: Move to target position with gripper pointing down (default orientation)
+        # This uses qx=1.0, qy=0.0, qz=0.0, qw=0.0 which is the default in compute_ik
+        self.get_logger().info('  → Step 1: Moving to target position with intermediate orientation...')
+        position_ik = self.ik_planner.compute_ik(
+            start_joint_state,
+            target_pose.pose.position.x,
+            target_pose.pose.position.y,
+            target_pose.pose.position.z,
+            1.0, 0.0, 0.0, 0.0  # Gripper pointing down (default orientation)
+        )
+
+        if position_ik is None:
+            self.get_logger().error('IK failed for position-only movement')
+            return None, None
+
+        # Step 2: Adjust orientation to target orientation
+        self.get_logger().info('  → Step 2: Adjusting to target orientation...')
+        final_ik = self.ik_planner.compute_ik(
+            position_ik,  # Start from the position we just reached
+            target_pose.pose.position.x,
+            target_pose.pose.position.y,
+            target_pose.pose.position.z,
+            target_pose.pose.orientation.x,
+            target_pose.pose.orientation.y,
+            target_pose.pose.orientation.z,
+            target_pose.pose.orientation.w
+        )
+
+        if final_ik is None:
+            self.get_logger().error('IK failed for orientation adjustment')
+            return None, None
+
+        return position_ik, final_ik
+
     async def move_to_target(self, target_pose):
-        """Move end effector to target position using IK"""
+        """Move end effector to target position using IK (two-step approach)"""
         if self.current_joint_state is None:
             self.get_logger().error('No joint state available')
             return False
 
         try:
             self.get_logger().info('='*60)
-            self.get_logger().info('Moving to target position (IK-based)')
+            self.get_logger().info('Moving to target position (IK-based, two-step)')
             self.get_logger().info(f'Target: x={target_pose.pose.position.x:.3f}, '
                                  f'y={target_pose.pose.position.y:.3f}, '
                                  f'z={target_pose.pose.position.z:.3f}')
             self.get_logger().info('='*60)
 
-            # Compute IK for target position
-            self.get_logger().info('Computing IK for target...')
-            ik_result = self.ik_planner.compute_ik(
+            # Use two-step approach: position first, then orientation
+            self.get_logger().info('Computing IK for target (two-step)...')
+            position_ik, final_ik = self.move_to_pose_two_step(
                 self.current_joint_state,
-                target_pose.pose.position.x,
-                target_pose.pose.position.y,
-                target_pose.pose.position.z,
-                target_pose.pose.orientation.x,
-                target_pose.pose.orientation.y,
-                target_pose.pose.orientation.z,
-                target_pose.pose.orientation.w
+                target_pose
             )
 
-            if ik_result is None:
+            if final_ik is None:
                 self.get_logger().error('IK failed for target position')
                 return False
 
-            # Plan to joint configuration
-            self.get_logger().info('Planning trajectory...')
-            trajectory = self.ik_planner.plan_to_joints(ik_result)
-            if trajectory is None:
-                self.get_logger().error('Planning failed')
-                return False
+            # Execute both steps
+            for step_num, ik_result in enumerate([position_ik, final_ik], 1):
+                step_name = "position" if step_num == 1 else "orientation"
+                self.get_logger().info(f'Planning trajectory for {step_name} adjustment...')
+                trajectory = self.ik_planner.plan_to_joints(ik_result, goal_tolerance=self.goal_tolerance)
+                if trajectory is None:
+                    self.get_logger().error(f'Planning failed for {step_name} adjustment')
+                    return False
 
-            # Execute trajectory
-            self.get_logger().info('Executing trajectory...')
-            success = await self.execute_trajectory(trajectory.joint_trajectory)
+                self.get_logger().info(f'Executing {step_name} adjustment...')
+                success = await self.execute_trajectory(trajectory.joint_trajectory)
+                if not success:
+                    self.get_logger().error(f'Execution failed for {step_name} adjustment')
+                    return False
 
-            if success:
-                self.get_logger().info('='*60)
-                self.get_logger().info('✅ Move to target complete!')
-                self.get_logger().info('='*60)
+            self.get_logger().info('='*60)
+            self.get_logger().info('✅ Move to target complete!')
+            self.get_logger().info('='*60)
 
-            return success
+            return True
 
         except Exception as e:
             self.get_logger().error(f'Exception: {e}')

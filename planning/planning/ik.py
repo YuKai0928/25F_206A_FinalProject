@@ -67,9 +67,15 @@ class IKPlanner(Node):
         self.get_logger().info('IK solution found.')
         return result.solution.joint_state
 
-    def plan_to_joints(self, target_joint_state, custom_joint_limits=None):
+    def plan_to_joints(self, target_joint_state, custom_joint_limits=None, goal_tolerance=0.01):
         """
         Plan motion to joint configuration for TM12
+
+        Args:
+            target_joint_state: Target joint configuration
+            custom_joint_limits: Optional joint limits for path constraints
+            goal_tolerance: Goal tolerance in radians (default: 0.01 rad ≈ 0.57°)
+                           Smaller = more precise, Larger = more lenient
         """
         limits = custom_joint_limits if custom_joint_limits else self.default_joint_limits
         req = GetMotionPlan.Request()
@@ -111,8 +117,8 @@ class IKPlanner(Node):
                 JointConstraint(
                     joint_name=name,
                     position=pos,
-                    tolerance_above=0.01,
-                    tolerance_below=0.01,
+                    tolerance_above=goal_tolerance,
+                    tolerance_below=goal_tolerance,
                     weight=1.0
                 )
             )
