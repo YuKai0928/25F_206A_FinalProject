@@ -211,7 +211,7 @@ class ArucoTFBroadcaster(Node):
             tfmsg.transform.rotation.w = float(qw)
             
             self.br.sendTransform(tfmsg)
-            for slotInd in range(5,25,5):# generate 4 slide frame for test usage
+            for slotInd in range(8,25,10):# generate 4 slide frame for test usage
                 self.pseudo_slide_frames(Rmat,tvec,slotInd,msg)
 
             break

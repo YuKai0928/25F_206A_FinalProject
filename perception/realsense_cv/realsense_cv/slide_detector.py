@@ -26,7 +26,7 @@ class SlideDetector(Node):
         self.picked_slides = set()
         
         # Configuration
-        self.declare_parameter('slide_indices', [5, 10, 15, 20])
+        self.declare_parameter('slide_indices', [8, 18])
         self.slide_indices = self.get_parameter('slide_indices').value
         
         self.get_logger().info('Slide Detector initialized')

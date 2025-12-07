@@ -1,0 +1,12 @@
+# Continuous Pick-and-Place Service
+# Executes pick-and-place cycles until no more slides detected
+
+# Input: Scan poses where camera can see targets
+geometry_msgs/PoseStamped pick_scan_pose   # Flange pose to see slide tray
+geometry_msgs/PoseStamped place_scan_pose  # Flange pose to see target plate
+
+# Tunable parameters (in meters)
+float32 pick_distance  # Distance to lower for grasp
+float32 retreat_distance   # Distance to lift after grasp
+float32 place_distance     # Distance to lower for place
+

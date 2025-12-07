@@ -1,0 +1,43 @@
+// generated from rosidl_adapter/resource/srv.idl.em
+// with input from planning_interfaces/srv/ContinuousPickPlace.srv
+// generated code does not contain a copyright notice
+
+#include "geometry_msgs/msg/PoseStamped.idl"
+
+module planning_interfaces {
+  module srv {
+    @verbatim (language="comment", text=
+      "Continuous Pick-and-Place Service" "\n"
+      "Executes pick-and-place cycles until no more slides detected")
+    struct ContinuousPickPlace_Request {
+      @verbatim (language="comment", text=
+        "Input: Scan poses where camera can see targets" "\n"
+        "Flange pose to see slide tray")
+      geometry_msgs::msg::PoseStamped pick_scan_pose;
+
+      @verbatim (language="comment", text=
+        "Flange pose to see target plate")
+      geometry_msgs::msg::PoseStamped place_scan_pose;
+
+      @verbatim (language="comment", text=
+        "Tunable parameters (in meters)" "\n"
+        "Distance to lower for grasp")
+      float pick_distance;
+
+      @verbatim (language="comment", text=
+        "Distance to lift after grasp")
+      float retreat_distance;
+
+      @verbatim (language="comment", text=
+        "Distance to lower for place")
+      float place_distance;
+    };
+    struct ContinuousPickPlace_Response {
+      boolean success;
+
+      string message;
+
+      int32 slides_picked;
+    };
+  };
+};
