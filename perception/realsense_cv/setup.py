@@ -22,7 +22,8 @@ setup(
             'edge_node=realsense_cv.edge_detect:main',
             'hsv_tuning=realsense_cv.hsv_tune:main',
             'marker_node=realsense_cv.marker_detect:main',
-            'yolo_node=realsense_cv.yolo_detect:main'
+            'yolo_node=realsense_cv.yolo_detect:main',
+            'slide_detector=realsense_cv.slide_detector:main',
         ],
     },
 )

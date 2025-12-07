@@ -8,10 +8,15 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
-from planning_interfaces.srv import PickPlaceService, MoveToTarget
+from planning_interfaces.srv import PickPlaceService, MoveToTarget, ContinuousPickPlace
 from std_srvs.srv import SetBool
 
-from planning.ik import IKPlanner  
+from planning.ik import IKPlanner
+from realsense_cv.slide_detector import SlideDetector
+
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+import asyncio
 
 
 class PickAndPlace(Node):
@@ -23,20 +28,21 @@ class PickAndPlace(Node):
         self.declare_parameter('end_effector_link', 'link_6')
         self.declare_parameter('base_frame', 'base')
         self.declare_parameter('approach_distance', 0.1)
-        self.declare_parameter('goal_tolerance', 0.01)  # Joint goal tolerance in radians (default: 0.01 rad ≈ 0.57°)
-
         self.planning_group = self.get_parameter('planning_group').value
         self.end_effector_link = self.get_parameter('end_effector_link').value
         self.base_frame = self.get_parameter('base_frame').value
         self.approach_distance = self.get_parameter('approach_distance').value
-        self.goal_tolerance = self.get_parameter('goal_tolerance').value
 
         # Callback group
         self.callback_group = ReentrantCallbackGroup()
 
-        # IK Planner (your working approach!)
+        # IK Planner
         self.ik_planner = IKPlanner()
         self.get_logger().info('IK Planner initialized')
+
+        # Slide Detector
+        self.slide_detector = SlideDetector()
+        self.get_logger().info('Slide Detector initialized')
 
         # Joint state tracking
         self.current_joint_state = None
@@ -51,7 +57,7 @@ class PickAndPlace(Node):
         self.exec_client = ActionClient(
             self,
             FollowJointTrajectory,
-            '/tmr_arm_controller/follow_joint_trajectory',  # TM12 controller
+            '/tmr_arm_controller/follow_joint_trajectory',
             callback_group=self.callback_group
         )
         self.exec_client.wait_for_server()
@@ -84,9 +90,17 @@ class PickAndPlace(Node):
             callback_group=self.callback_group
         )
 
+        # Service for continuous pick and place
+        self.continuous_srv = self.create_service(
+            ContinuousPickPlace,
+            'continuous_pick_place',
+            self.continuous_pick_place_callback,
+            callback_group=self.callback_group
+        )
+
         self.processing = False
 
-        self.get_logger().info('Ready! Using IK-based planning')
+        self.get_logger().info('Ready! Pick-and-Place node initialized')
 
     def joint_state_callback(self, msg):
         """Store latest joint state"""
@@ -145,32 +159,36 @@ class PickAndPlace(Node):
             # Build job queue
             job_queue = []
 
-            # 1. Compute IK for pick approach (two-step: position then orientation)
+            # 1. Compute IK for pick approach
             self.get_logger().info('Step 1/8: Computing IK for pick approach...')
             pick_approach = self.get_approach_pose(pick_pose)
-            position_ik, ik_result = self.move_to_pose_two_step(
+            ik_result = self.ik_planner.compute_ik(
                 self.current_joint_state,
-                pick_approach
+                pick_approach.pose.position.x,
+                pick_approach.pose.position.y,
+                pick_approach.pose.position.z,
+                pick_approach.pose.orientation.x,
+                pick_approach.pose.orientation.y,
+                pick_approach.pose.orientation.z,
+                pick_approach.pose.orientation.w
             )
             if ik_result is None:
                 response.success = False
                 response.message = "IK failed for pick approach"
                 return response
-            # Add both steps to job queue
-            job_queue.append(position_ik)  # First reach position
-            job_queue.append(ik_result)     # Then adjust orientation
+            job_queue.append(ik_result)
 
-            # 2. Compute IK for pick position (straight down, maintain approach orientation)
-            self.get_logger().info('Step 2/8: Computing IK for pick (descending)...')
+            # 2. Compute IK for pick position
+            self.get_logger().info('Step 2/8: Computing IK for pick...')
             ik_result = self.ik_planner.compute_ik(
                 ik_result,
                 pick_pose.pose.position.x,
                 pick_pose.pose.position.y,
                 pick_pose.pose.position.z,
-                pick_approach.pose.orientation.x,  # Maintain approach orientation
-                pick_approach.pose.orientation.y,
-                pick_approach.pose.orientation.z,
-                pick_approach.pose.orientation.w
+                pick_pose.pose.orientation.x,
+                pick_pose.pose.orientation.y,
+                pick_pose.pose.orientation.z,
+                pick_pose.pose.orientation.w
             )
             if ik_result is None:
                 response.success = False
@@ -181,9 +199,9 @@ class PickAndPlace(Node):
             # 3. Close gripper
             job_queue.append('close_gripper')
 
-            # 4. Retreat (straight up)
-            self.get_logger().info('Step 4/8: Computing IK for pick retreat (ascending)...')
-            retreat_ik = self.ik_planner.compute_ik(
+            # 4. Retreat
+            self.get_logger().info('Step 4/8: Computing IK for pick retreat...')
+            ik_result = self.ik_planner.compute_ik(
                 ik_result,
                 pick_approach.pose.position.x,
                 pick_approach.pose.position.y,
@@ -193,38 +211,42 @@ class PickAndPlace(Node):
                 pick_approach.pose.orientation.z,
                 pick_approach.pose.orientation.w
             )
-            if retreat_ik is None:
+            if ik_result is None:
                 response.success = False
                 response.message = "IK failed for pick retreat"
                 return response
-            job_queue.append(retreat_ik)
+            job_queue.append(ik_result)
 
-            # 5. Place approach (two-step: position then orientation)
+            # 5. Place approach
             self.get_logger().info('Step 5/8: Computing IK for place approach...')
             place_approach = self.get_approach_pose(place_pose)
-            position_ik, ik_result = self.move_to_pose_two_step(
+            ik_result = self.ik_planner.compute_ik(
                 ik_result,
-                place_approach
+                place_approach.pose.position.x,
+                place_approach.pose.position.y,
+                place_approach.pose.position.z,
+                place_approach.pose.orientation.x,
+                place_approach.pose.orientation.y,
+                place_approach.pose.orientation.z,
+                place_approach.pose.orientation.w
             )
             if ik_result is None:
                 response.success = False
                 response.message = "IK failed for place approach"
                 return response
-            # Add both steps to job queue
-            job_queue.append(position_ik)  # First reach position
-            job_queue.append(ik_result)     # Then adjust orientation
+            job_queue.append(ik_result)
 
-            # 6. Place position (straight down, maintain approach orientation)
-            self.get_logger().info('Step 6/8: Computing IK for place (descending)...')
+            # 6. Place position
+            self.get_logger().info('Step 6/8: Computing IK for place...')
             ik_result = self.ik_planner.compute_ik(
                 ik_result,
                 place_pose.pose.position.x,
                 place_pose.pose.position.y,
                 place_pose.pose.position.z,
-                place_approach.pose.orientation.x,  # Maintain approach orientation
-                place_approach.pose.orientation.y,
-                place_approach.pose.orientation.z,
-                place_approach.pose.orientation.w
+                place_pose.pose.orientation.x,
+                place_pose.pose.orientation.y,
+                place_pose.pose.orientation.z,
+                place_pose.pose.orientation.w
             )
             if ik_result is None:
                 response.success = False
@@ -235,9 +257,9 @@ class PickAndPlace(Node):
             # 7. Open gripper
             job_queue.append('open_gripper')
 
-            # 8. Retreat (straight up)
-            self.get_logger().info('Step 8/8: Computing IK for place retreat (ascending)...')
-            retreat_ik = self.ik_planner.compute_ik(
+            # 8. Retreat
+            self.get_logger().info('Step 8/8: Computing IK for place retreat...')
+            ik_result = self.ik_planner.compute_ik(
                 ik_result,
                 place_approach.pose.position.x,
                 place_approach.pose.position.y,
@@ -247,18 +269,18 @@ class PickAndPlace(Node):
                 place_approach.pose.orientation.z,
                 place_approach.pose.orientation.w
             )
-            if retreat_ik is None:
+            if ik_result is None:
                 response.success = False
                 response.message = "IK failed for place retreat"
                 return response
-            job_queue.append(retreat_ik)
+            job_queue.append(ik_result)
 
             # Execute all jobs
             success = await self.execute_job_queue(job_queue)
             
             if success:
                 self.get_logger().info('='*60)
-                self.get_logger().info('✅ Pick and Place Complete!')
+                self.get_logger().info('Pick and Place Complete!')
                 self.get_logger().info('='*60)
                 response.success = True
                 response.message = "Success"
@@ -275,44 +297,376 @@ class PickAndPlace(Node):
 
         return response
 
+    async def continuous_pick_place_callback(self, request, response):
+        """
+        Executes pick-and-place cycles until no more slides are detected.
+        """
+        
+        if self.processing:
+            response.success = False
+            response.message = "Already processing"
+            return response
+        
+        if self.current_joint_state is None:
+            response.success = False
+            response.message = "No joint state available"
+            return response
+        
+        self.processing = True
+        slides_picked = 0
+        
+        # Extract parameters
+        pick_scan = request.pick_scan_pose
+        place_scan = request.place_scan_pose
+        pick_dist = request.pick_distance
+        retreat_dist = request.retreat_distance
+        place_dist = request.place_distance
+        
+        self.get_logger().info('='*60)
+        self.get_logger().info('CONTINUOUS PICK-AND-PLACE STARTED')
+        self.get_logger().info('='*60)
+        self.get_logger().info(f'Pick distance: {pick_dist}m (TODO: TUNE)')
+        self.get_logger().info(f'Retreat distance: {retreat_dist}m (TODO: TUNE)')
+        self.get_logger().info(f'Place distance: {place_dist}m (TODO: TUNE)')
+        self.get_logger().info('='*60)
+        
+        try:
+            while True:
+                self.get_logger().info('')
+                self.get_logger().info('='*60)
+                self.get_logger().info(f'CYCLE {slides_picked + 1}')
+                self.get_logger().info('='*60)
+                
+                # ========================================
+                # STEP 1: Move to pick scan pose
+                # ========================================
+                self.get_logger().info('Step 1: Moving to pick scan pose...')
+                if not await self.move_to_target(pick_scan):
+                    response.success = False
+                    response.message = "Failed to reach pick scan pose"
+                    response.slides_picked = slides_picked
+                    return response
+                
+                # Brief pause for camera/marker detection to stabilize
+                await asyncio.sleep(0.5)
+                
+                # ========================================
+                # STEP 2: Detect slide
+                # ========================================
+                self.get_logger().info('Step 2: Detecting slide...')
+                slide_pose = self.slide_detector.wait_for_slide(timeout=3.0)
+                
+                if slide_pose is None:
+                    self.get_logger().info('No more slides detected - operation complete')
+                    break
+                
+                self.get_logger().info(f'Slide detected at ({slide_pose.pose.position.x:.3f}, '
+                                     f'{slide_pose.pose.position.y:.3f}, '
+                                     f'{slide_pose.pose.position.z:.3f})')
+                
+                # ========================================
+                # BUILD JOB QUEUE FOR THIS SLIDE
+                # ========================================
+                self.get_logger().info('Building job queue for this slide...')
+                
+                job_queue = []
+                current_state = self.current_joint_state
+                
+                # Job 1: Align with slide (XY + orientation, keep current Z from pick_scan_pose)
+                self.get_logger().info('  Job 1/9: Computing align pose ...')
+                align_pose = self.compute_alignment_pose(slide_pose)
+                
+                ik_align = self.ik_planner.compute_ik(
+                    current_state,
+                    align_pose.pose.position.x,
+                    align_pose.pose.position.y,
+                    align_pose.pose.position.z,
+                    align_pose.pose.orientation.x,
+                    align_pose.pose.orientation.y,
+                    align_pose.pose.orientation.z,
+                    align_pose.pose.orientation.w
+                )
+                if ik_align is None:
+                    self.get_logger().error('IK failed for align pose - skipping this slide')
+                    continue
+                job_queue.append(ik_align)
+                current_state = ik_align
+                
+                # Job 2: Lower for grasp
+                self.get_logger().info(f'  Job 2/9: Computing lower ({pick_dist}m) - TODO: TUNE')
+                lower_pose = self.offset_pose_z(align_pose, -pick_dist)
+                
+                ik_lower = self.ik_planner.compute_ik(
+                    current_state,
+                    lower_pose.pose.position.x,
+                    lower_pose.pose.position.y,
+                    lower_pose.pose.position.z,
+                    lower_pose.pose.orientation.x,
+                    lower_pose.pose.orientation.y,
+                    lower_pose.pose.orientation.z,
+                    lower_pose.pose.orientation.w
+                )
+                if ik_lower is None:
+                    self.get_logger().error('IK failed for lower pose - skipping this slide')
+                    continue
+                job_queue.append(ik_lower)
+                current_state = ik_lower
+                
+                # Job 3: Close gripper
+                self.get_logger().info('  Job 3/9: Close gripper')
+                job_queue.append('close_gripper')
+                
+                # Job 4: Lift after grasp
+                self.get_logger().info(f'  Job 4/9: Computing lift ({retreat_dist}m) - TODO: TUNE')
+                lift_pose = self.offset_pose_z(lower_pose, retreat_dist)
+                
+                ik_lift = self.ik_planner.compute_ik(
+                    current_state,
+                    lift_pose.pose.position.x,
+                    lift_pose.pose.position.y,
+                    lift_pose.pose.position.z,
+                    lift_pose.pose.orientation.x,
+                    lift_pose.pose.orientation.y,
+                    lift_pose.pose.orientation.z,
+                    lift_pose.pose.orientation.w
+                )
+                if ik_lift is None:
+                    self.get_logger().error('IK failed for lift pose - skipping this slide')
+                    continue
+                job_queue.append(ik_lift)
+                current_state = ik_lift
+                
+                # Job 5: Move to place scan pose
+                self.get_logger().info('  Job 5/9: Computing place scan pose...')
+                ik_place_scan = self.ik_planner.compute_ik(
+                    current_state,
+                    place_scan.pose.position.x,
+                    place_scan.pose.position.y,
+                    place_scan.pose.position.z,
+                    place_scan.pose.orientation.x,
+                    place_scan.pose.orientation.y,
+                    place_scan.pose.orientation.z,
+                    place_scan.pose.orientation.w
+                )
+                if ik_place_scan is None:
+                    self.get_logger().error('IK failed for place scan pose - skipping this slide')
+                    continue
+                job_queue.append(ik_place_scan)
+                current_state = ik_place_scan
+                
+                # Job 6: Align with target (for now, same as place_scan)
+                self.get_logger().info('  Job 6/9: Target align (same as scan for now)')
+                # Already there from job 5
+                
+                # Job 7: Lower for place
+                self.get_logger().info(f'  Job 7/9: Computing place lower ({place_dist}m) - TODO: TUNE')
+                place_lower_pose = self.offset_pose_z(place_scan, -place_dist)
+                
+                ik_place_lower = self.ik_planner.compute_ik(
+                    current_state,
+                    place_lower_pose.pose.position.x,
+                    place_lower_pose.pose.position.y,
+                    place_lower_pose.pose.position.z,
+                    place_lower_pose.pose.orientation.x,
+                    place_lower_pose.pose.orientation.y,
+                    place_lower_pose.pose.orientation.z,
+                    place_lower_pose.pose.orientation.w
+                )
+                if ik_place_lower is None:
+                    self.get_logger().error('IK failed for place lower - skipping this slide')
+                    continue
+                job_queue.append(ik_place_lower)
+                current_state = ik_place_lower
+                
+                # Job 8: Open gripper
+                self.get_logger().info('  Job 8/9: Open gripper')
+                job_queue.append('open_gripper')
+                
+                # Job 9: Lift after place
+                self.get_logger().info(f'  Job 9/9: Computing final lift ({retreat_dist}m)...')
+                final_lift_pose = self.offset_pose_z(place_lower_pose, retreat_dist)
+                
+                ik_final_lift = self.ik_planner.compute_ik(
+                    current_state,
+                    final_lift_pose.pose.position.x,
+                    final_lift_pose.pose.position.y,
+                    final_lift_pose.pose.position.z,
+                    final_lift_pose.pose.orientation.x,
+                    final_lift_pose.pose.orientation.y,
+                    final_lift_pose.pose.orientation.z,
+                    final_lift_pose.pose.orientation.w
+                )
+                if ik_final_lift is None:
+                    self.get_logger().error('IK failed for final lift - skipping this slide')
+                    continue
+                job_queue.append(ik_final_lift)
+                
+                # ========================================
+                # EXECUTE QUEUE
+                # ========================================
+                self.get_logger().info(f'All IK solutions found! Queue has {len(job_queue)} jobs')
+                self.get_logger().info('Executing queue...')
+                
+                success = await self.execute_job_queue(job_queue)
+                
+                if success:
+                    slides_picked += 1
+                    self.get_logger().info(f'Slide {slides_picked} complete!')
+                else:
+                    self.get_logger().error('Execution failed for this slide')
+                
+                # Brief pause before next slide
+                await asyncio.sleep(1.0)
+            
+            # All done
+            self.get_logger().info('='*60)
+            self.get_logger().info(f'OPERATION COMPLETE - Successfully picked {slides_picked} slides')
+            self.get_logger().info('='*60)
+            response.success = True
+            response.message = f"Successfully picked {slides_picked} slides"
+            response.slides_picked = slides_picked
+            
+        except Exception as e:
+            self.get_logger().error(f'Exception: {e}')
+            import traceback
+            traceback.print_exc()
+            response.success = False
+            response.message = f"Exception after {slides_picked} slides: {str(e)}"
+            response.slides_picked = slides_picked
+        
+        finally:
+            self.processing = False
+        
+        return response
+
+    # MODIFIED: Updated function signature and implementation
+    def compute_alignment_pose(self, slide_pose, current_z=None):
+        """
+        Compute flange pose aligned with slide.
+        
+        Position: slide XY, keep current Z height (from pick_scan_pose)
+        Orientation: Y-axis parallel to slide X-axis, Z-axis points down
+        
+        Args:
+            slide_pose: PoseStamped of detected slide
+            current_z: Current Z height (if None, gets from robot TF)
+            
+        Returns:
+            PoseStamped for flange alignment pose
+        """
+        # ADDED: Get current Z from robot TF if not provided
+        if current_z is None:
+            try:
+                transform = self.ik_planner.tf_buffer.lookup_transform(
+                    'base',
+                    'link_6',
+                    rclpy.time.Time()
+                )
+                current_z = transform.transform.translation.z
+                self.get_logger().info(f'Using current Z height: {current_z:.3f}m')
+            except:
+                self.get_logger().warn('Cannot get current Z, using slide Z + 0.1m as fallback')
+                current_z = slide_pose.pose.position.z + 0.10
+        
+        # Extract slide orientation
+        slide_quat = np.array([
+            slide_pose.pose.orientation.x,
+            slide_pose.pose.orientation.y,
+            slide_pose.pose.orientation.z,
+            slide_pose.pose.orientation.w
+        ])
+        
+        slide_rot = R.from_quat(slide_quat)
+        slide_x_axis = slide_rot.as_matrix()[:, 0]  # First column = X-axis
+        
+        # Build flange orientation
+        # Z-axis: pointing down (world -Z)
+        flange_z = np.array([0, 0, -1])
+        
+        # Y-axis: aligned with slide X-axis, projected to horizontal
+        flange_y = slide_x_axis.copy()
+        flange_y[2] = 0.0  # Project to XY plane
+        
+        norm_y = np.linalg.norm(flange_y)
+        if norm_y < 1e-6:
+            # Slide is vertical - fall back to world Y
+            flange_y = np.array([0, 1, 0])
+        else:
+            flange_y /= norm_y
+        
+        # X-axis: Y cross Z (right-hand rule)
+        flange_x = np.cross(flange_y, flange_z)
+        flange_x /= np.linalg.norm(flange_x)
+        
+        # Recompute Y to ensure orthogonality
+        flange_y = np.cross(flange_z, flange_x)
+        
+        # Build rotation matrix
+        flange_rot_mat = np.column_stack([flange_x, flange_y, flange_z])
+        flange_rot = R.from_matrix(flange_rot_mat)
+        flange_quat = flange_rot.as_quat()  # [x, y, z, w]
+        
+        # Build pose
+        align_pose = PoseStamped()
+        align_pose.header.frame_id = 'base'
+        align_pose.header.stamp = self.get_clock().now().to_msg()
+        align_pose.pose.position.x = slide_pose.pose.position.x
+        align_pose.pose.position.y = slide_pose.pose.position.y
+        align_pose.pose.position.z = current_z  # Use current Z
+        align_pose.pose.orientation.x = flange_quat[0]
+        align_pose.pose.orientation.y = flange_quat[1]
+        align_pose.pose.orientation.z = flange_quat[2]
+        align_pose.pose.orientation.w = flange_quat[3]
+        
+        return align_pose
+    
+    def offset_pose_z(self, pose, delta_z):
+        """
+        Create new pose with Z offset.
+        
+        Args:
+            pose: Original PoseStamped
+            delta_z: Z offset in meters (positive = up, negative = down)
+            
+        Returns:
+            New PoseStamped with Z offset applied
+        """
+        new_pose = PoseStamped()
+        new_pose.header = pose.header
+        new_pose.pose.position.x = pose.pose.position.x
+        new_pose.pose.position.y = pose.pose.position.y
+        new_pose.pose.position.z = pose.pose.position.z + delta_z
+        new_pose.pose.orientation = pose.pose.orientation
+        return new_pose
+
     async def execute_job_queue(self, job_queue):
         """Execute all jobs in the queue"""
-        # Track current state through the queue execution
-        current_state = self.current_joint_state
-
         for i, job in enumerate(job_queue):
             self.get_logger().info(f'Executing job {i+1}/{len(job_queue)}...')
-
+            
             if isinstance(job, JointState):
-                # Plan to joint configuration with explicit start state
-                trajectory = self.ik_planner.plan_to_joints(
-                    job,
-                    start_joint_state=current_state,
-                    goal_tolerance=self.goal_tolerance
-                )
+                # Plan to joint configuration
+                trajectory = self.ik_planner.plan_to_joints(job)
                 if trajectory is None:
                     self.get_logger().error('Planning failed')
                     return False
-
+                
                 # Execute trajectory
                 if not await self.execute_trajectory(trajectory.joint_trajectory):
                     return False
-
-                # Update current state to the goal state for next planning
-                current_state = job
-
+                    
             elif job == 'close_gripper':
-                self.get_logger().info('🤏 Closing gripper...')
+                self.get_logger().info('Closing gripper...')
                 if not await self.control_gripper(True):
                     self.get_logger().error('Failed to close gripper')
                     return False
 
             elif job == 'open_gripper':
-                self.get_logger().info('✋ Opening gripper...')
+                self.get_logger().info('Opening gripper...')
                 if not await self.control_gripper(False):
                     self.get_logger().error('Failed to open gripper')
                     return False
-
+                
         return True
 
     async def execute_trajectory(self, joint_trajectory):
@@ -358,111 +712,54 @@ class PickAndPlace(Node):
         approach.pose.orientation = target_pose.pose.orientation
         return approach
 
-    def move_to_pose_two_step(self, start_joint_state, target_pose):
-        """
-        Move to target pose in two steps to avoid excessive joint 1 rotation:
-        1. Move to target position with current orientation (maintain current orientation)
-        2. Adjust to target orientation
-
-        Returns: tuple (position_ik_result, final_ik_result) or (None, None) on failure
-        """
-        # Step 1: Move to target position while maintaining current end-effector orientation
-        self.get_logger().info('  → Step 1: Moving to target position with current orientation...')
-
-        # Compute current end-effector orientation using FK
-        current_pose = self.ik_planner.compute_fk(start_joint_state)
-        if current_pose is None:
-            self.get_logger().error('FK failed to compute current orientation')
-            return None, None
-
-        # Move to target position with current orientation
-        position_ik = self.ik_planner.compute_ik(
-            start_joint_state,
-            target_pose.pose.position.x,
-            target_pose.pose.position.y,
-            target_pose.pose.position.z,
-            current_pose.pose.orientation.x,
-            current_pose.pose.orientation.y,
-            current_pose.pose.orientation.z,
-            current_pose.pose.orientation.w
-        )
-
-        if position_ik is None:
-            self.get_logger().error('IK failed for position-only movement')
-            return None, None
-
-        # Step 2: Adjust orientation to target orientation
-        self.get_logger().info('  → Step 2: Adjusting to target orientation...')
-        final_ik = self.ik_planner.compute_ik(
-            position_ik,  # Start from the position we just reached
-            target_pose.pose.position.x,
-            target_pose.pose.position.y,
-            target_pose.pose.position.z,
-            target_pose.pose.orientation.x,
-            target_pose.pose.orientation.y,
-            target_pose.pose.orientation.z,
-            target_pose.pose.orientation.w
-        )
-
-        if final_ik is None:
-            self.get_logger().error('IK failed for orientation adjustment')
-            return None, None
-
-        return position_ik, final_ik
-
     async def move_to_target(self, target_pose):
-        """Move end effector to target position using IK (two-step approach)"""
+        """Move end effector to target position using IK"""
         if self.current_joint_state is None:
             self.get_logger().error('No joint state available')
             return False
 
         try:
             self.get_logger().info('='*60)
-            self.get_logger().info('Moving to target position (IK-based, two-step)')
+            self.get_logger().info('Moving to target position (IK-based)')
             self.get_logger().info(f'Target: x={target_pose.pose.position.x:.3f}, '
                                  f'y={target_pose.pose.position.y:.3f}, '
                                  f'z={target_pose.pose.position.z:.3f}')
             self.get_logger().info('='*60)
 
-            # Use two-step approach: position first, then orientation
-            self.get_logger().info('Computing IK for target (two-step)...')
-            position_ik, final_ik = self.move_to_pose_two_step(
+            # Compute IK for target position
+            self.get_logger().info('Computing IK for target...')
+            ik_result = self.ik_planner.compute_ik(
                 self.current_joint_state,
-                target_pose
+                target_pose.pose.position.x,
+                target_pose.pose.position.y,
+                target_pose.pose.position.z,
+                target_pose.pose.orientation.x,
+                target_pose.pose.orientation.y,
+                target_pose.pose.orientation.z,
+                target_pose.pose.orientation.w
             )
 
-            if final_ik is None:
+            if ik_result is None:
                 self.get_logger().error('IK failed for target position')
                 return False
 
-            # Execute both steps with explicit start states
-            current_state = self.current_joint_state
-            for step_num, ik_result in enumerate([position_ik, final_ik], 1):
-                step_name = "position" if step_num == 1 else "orientation"
-                self.get_logger().info(f'Planning trajectory for {step_name} adjustment...')
-                trajectory = self.ik_planner.plan_to_joints(
-                    ik_result,
-                    start_joint_state=current_state,
-                    goal_tolerance=self.goal_tolerance
-                )
-                if trajectory is None:
-                    self.get_logger().error(f'Planning failed for {step_name} adjustment')
-                    return False
+            # Plan to joint configuration
+            self.get_logger().info('Planning trajectory...')
+            trajectory = self.ik_planner.plan_to_joints(ik_result)
+            if trajectory is None:
+                self.get_logger().error('Planning failed')
+                return False
 
-                self.get_logger().info(f'Executing {step_name} adjustment...')
-                success = await self.execute_trajectory(trajectory.joint_trajectory)
-                if not success:
-                    self.get_logger().error(f'Execution failed for {step_name} adjustment')
-                    return False
+            # Execute trajectory
+            self.get_logger().info('Executing trajectory...')
+            success = await self.execute_trajectory(trajectory.joint_trajectory)
 
-                # Update current state for next step
-                current_state = ik_result
+            if success:
+                self.get_logger().info('='*60)
+                self.get_logger().info('Move to target complete!')
+                self.get_logger().info('='*60)
 
-            self.get_logger().info('='*60)
-            self.get_logger().info('✅ Move to target complete!')
-            self.get_logger().info('='*60)
-
-            return True
+            return success
 
         except Exception as e:
             self.get_logger().error(f'Exception: {e}')

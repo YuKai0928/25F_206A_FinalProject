@@ -25,9 +25,13 @@ class IKPlanner(Node):
 
         # ---- Default joint limits for TM12 ----
         self.default_joint_limits = {
-            # 'joint_2': (math.radians(-70), math.radians(0)),  # Limit joint_2
+            'joint_6': (math.radians(36), math.radians(254)),  # Limit joint_2
             # Add more if needed:
-            # 'joint_1': (math.radians(-180), math.radians(180)),
+            'joint_1': (math.radians(-67), math.radians(48)),
+            'joint_5': (math.radians(60), math.radians(110)),
+            'joint_2': (math.radians(-31), math.radians(65)),
+            'joint_3': (math.radians(44), math.radians(154)),
+            'joint_4': (math.radians(-110), math.radians(-6)),
         }
 
     def compute_ik(self, current_joint_state, x, y, z,

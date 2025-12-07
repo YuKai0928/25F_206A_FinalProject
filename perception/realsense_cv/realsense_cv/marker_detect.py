@@ -43,6 +43,43 @@ def rotation_matrix_to_quaternion(R):
 
     return q[0], q[1], q[2], q[3]
 
+def lock_z_axis(R):
+    # Original axes (columns)
+    x_orig = R[:, 0]
+    y_orig = R[:, 1]
+    z_orig = R[:, 2]
+
+    # Choose +Z or -Z to be closest to original z axis
+    if z_orig[2] >= 0:
+        z_new = np.array([0.0, 0.0, 1.0])
+    else:
+        z_new = np.array([0.0, 0.0, -1.0])
+
+    # Project original X axis into XY plane
+    x_proj = x_orig.copy()
+    x_proj[2] = 0.0
+    norm_x = np.linalg.norm(x_proj)
+
+    # If X is almost vertical, fall back to projecting Y
+    if norm_x < 1e-6:
+        y_proj = y_orig.copy()
+        y_proj[2] = 0.0
+        norm_y = np.linalg.norm(y_proj)
+        if norm_y < 1e-6:
+            # Degenerate case: both x and y almost vertical, just pick +X
+            x_new = np.array([1.0, 0.0, 0.0])
+        else:
+            x_new = y_proj / norm_y
+    else:
+        x_new = x_proj / norm_x
+
+    # Y axis = Z × X to make a right-handed orthonormal basis
+    y_new = np.cross(z_new, x_new)
+    y_new /= np.linalg.norm(y_new)
+
+    R_locked = np.column_stack((x_new, y_new, z_new))
+    return R_locked
+
 
 class ArucoTFBroadcaster(Node):
     def __init__(self):
@@ -53,8 +90,8 @@ class ArucoTFBroadcaster(Node):
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('marker_length_m', 0.02)
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
-        self.declare_parameter('marker_frame1', 'ar_marker_02')
-        self.declare_parameter('marker_frame2', 'ar_marker_03')
+        self.declare_parameter('box_frame', 'ar_marker_02')
+        self.declare_parameter('tray_frame', 'ar_marker_03')
 
         self.declare_parameter('aruco_dict', 'DICT_4X4_50')
         self.declare_parameter('target_id1', 2)
@@ -66,12 +103,14 @@ class ArucoTFBroadcaster(Node):
 
         self.marker_length = self.get_parameter('marker_length_m').value
         self.camera_frame = self.get_parameter('camera_frame').value
-        self.marker_frame1 = self.get_parameter('marker_frame1').value
-        self.marker_frame2 = self.get_parameter('marker_frame2').value
+        self.box_frame = self.get_parameter('box_frame').value
+        self.tray_frame = self.get_parameter('tray_frame').value
 
         dict_name = self.get_parameter('aruco_dict').value
         self.target_id1 = self.get_parameter('target_id1').value
         self.target_id2 = self.get_parameter('target_id2').value
+
+        self.image_pub = self.create_publisher(Image, 'aruco_annotated', 10)
 
 
         self.bridge = CvBridge()
@@ -86,8 +125,8 @@ class ArucoTFBroadcaster(Node):
         self.caminfo_sub = self.create_subscription(CameraInfo, info_topic, self.camera_info_callback, 10)
 
         self.dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dict_name))
-        self.parameters = cv2.aruco.DetectorParameters()
-        self.detector = cv2.aruco.ArucoDetector(self.dictionary, self.parameters)
+        self.parameters = cv2.aruco.DetectorParameters_create()
+        # self.detector = cv2.aruco.ArucoDetector(self.dictionary, self.parameters)
 
         self.last_warn_time = self.get_clock().now()
 
@@ -115,7 +154,8 @@ class ArucoTFBroadcaster(Node):
 
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
 
-        corners, ids, rejected = self.detector.detectMarkers(gray)
+        # corners, ids, rejected = self.detector.detectMarkers(gray)
+        corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.dictionary, parameters=self.parameters)
 
         if ids is None:
             return
@@ -126,17 +166,20 @@ class ArucoTFBroadcaster(Node):
         )
 
         ids = ids.flatten()
+        annotated = cv_image.copy()
 
         for i, marker_id in enumerate(ids):
             self.get_logger().info(f"found id {marker_id}")
             if marker_id != self.target_id1 and marker_id != self.target_id2:
-                
                 continue
 
             rvec = rvecs[i][0]
             tvec = tvecs[i][0]
 
             Rmat, _ = cv2.Rodrigues(rvec)
+            # Force Z axis perpendicular to table
+            Rmat = lock_z_axis(Rmat) # lock z axis!
+
             qx, qy, qz, qw = rotation_matrix_to_quaternion(Rmat)
 
             # Build TF
@@ -144,11 +187,19 @@ class ArucoTFBroadcaster(Node):
             tfmsg.header.stamp = msg.header.stamp
             tfmsg.header.frame_id = self.camera_frame
             if marker_id == self.target_id1:
-                tfmsg.child_frame_id = self.marker_frame1
+                tfmsg.child_frame_id = self.box_frame
             else:
-                tfmsg.child_frame_id = self.marker_frame2
+                tfmsg.child_frame_id = self.tray_frame
+            axis_length = self.marker_length * 0.5  # visible “frame” size
 
-
+            cv2.drawFrameAxes(
+                annotated,
+                self.camera_matrix,
+                self.dist_coeffs,
+                rvec,
+                tvec,
+                axis_length
+            )
 
             tfmsg.transform.translation.x = float(tvec[0])
             tfmsg.transform.translation.y = float(tvec[1])
@@ -158,9 +209,54 @@ class ArucoTFBroadcaster(Node):
             tfmsg.transform.rotation.y = float(qy)
             tfmsg.transform.rotation.z = float(qz)
             tfmsg.transform.rotation.w = float(qw)
-
+            
             self.br.sendTransform(tfmsg)
+            for slotInd in range(5,25,5):# generate 4 slide frame for test usage
+                self.pseudo_slide_frames(Rmat,tvec,slotInd,msg)
+
             break
+        
+    def pseudo_slide_frames(self,RMarker, TMarker, slotInd,msg):
+        
+        """
+        Parent -> Child: (R_pc, t_pc)
+        Child  -> New : (R_cn, t_cn)
+
+        Returns Parent -> New: (R_pn, t_pn)
+        """
+        R_slide_cam = np.array([
+            [0,  1, 0],
+            [1, 0, 0],
+            [0,  0, -1],
+        ], dtype=np.float64)
+        T_slide_cam = np.array([
+            [-0.0528*(25-slotInd)-0.013],
+            [0.0387-0.01], # aruco marker center -> short side center
+            [0.0],
+        ], dtype=np.float64)
+        R_pn = RMarker @ R_slide_cam
+        t_pn = (RMarker @ T_slide_cam).squeeze(-1) + TMarker
+        # print(TMarker.shape,t_pn.shape,T_slide_cam.shape,RMarker.shape,(RMarker @ T_slide_cam).shape)
+        # Convert to quaternion
+        qx, qy, qz, qw = rotation_matrix_to_quaternion(R_pn)
+
+        # Build and send TF
+        tfmsg = TransformStamped()
+        tfmsg.header.stamp = msg.header.stamp
+        tfmsg.header.frame_id = self.camera_frame
+        tfmsg.child_frame_id = f"slide_{slotInd:02d}"
+
+        tfmsg.transform.translation.x = float(t_pn[0])
+        tfmsg.transform.translation.y = float(t_pn[1])
+        tfmsg.transform.translation.z = float(t_pn[2])
+
+        tfmsg.transform.rotation.x = float(qx)
+        tfmsg.transform.rotation.y = float(qy)
+        tfmsg.transform.rotation.z = float(qz)
+        tfmsg.transform.rotation.w = float(qw)
+
+        self.br.sendTransform(tfmsg)
+        return R_pn, t_pn
 
 
 def main():

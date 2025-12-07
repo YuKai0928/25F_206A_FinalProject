@@ -5,6 +5,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 import cv2
+import numpy as np
 
 
 class CannyEdgeNode(Node):
@@ -34,7 +35,21 @@ class CannyEdgeNode(Node):
 
         self.get_logger().info(f'Subscribing to: {input_topic}')
         self.get_logger().info(f'Publishing edge overlay on: {output_topic}')
+    def fill_mask_holes(self,mask):
+        # find contours with hierarchy
+        contours, hierarchy = cv2.findContours(
+            mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+        )
 
+        # new empty mask
+        filled = np.zeros_like(mask)
+
+        # fill only the outer contours (parent = -1)
+        for i, h in enumerate(hierarchy[0]):
+            if h[3] == -1:  # h[3] = parent contour index
+                cv2.drawContours(filled, contours, i, color=255, thickness=cv2.FILLED)
+
+        return filled
     def image_callback(self, msg: Image):
         self.get_logger().info(f'get image.')
         try:
@@ -54,36 +69,33 @@ class CannyEdgeNode(Node):
         # Yellow
         lower_yellow = (20, 80, 80)
         upper_yellow = (35, 255, 255)
+        mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
         # Orange
         lower_orange = (5, 80, 80)
         upper_orange = (20, 255, 255)
-
-        mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
         mask_orange = cv2.inRange(hsv, lower_orange, upper_orange)
         mask = cv2.bitwise_or(mask_yellow, mask_orange)
+        # Red
+        lower_red = (172, 120, 160)
+        upper_red = (177, 160, 210)
+        mask = cv2.inRange(hsv, lower_red, upper_red)
 
+
+        
         # Clean up the mask
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-        # --- Canny on masked grayscale ---
-        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        gray_masked = cv2.bitwise_and(gray, gray, mask=mask)
+        # Fill holes inside the tray region
+        mask_filled = self.fill_mask_holes(mask)
 
-        # Canny edge detection -> single-channel binary image
-        blurred = cv2.GaussianBlur(gray_masked, (5, 5), 0)
+        # Find outer contours on the filled mask
+        contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        edges = cv2.Canny(blurred, t1, t2, L2gradient=True)
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-        # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        # edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-        # Create a color overlay: draw edges in red on original image
+        # Draw contours on a copy of the original image
         overlay = cv_image.copy()
-        # Where edges are non-zero, color those pixels red [B,G,R] = [0, 0, 255]
-        overlay[edges != 0] = [0, 0, 255]
+        cv2.drawContours(overlay, contours, -1, (0, 0, 255), thickness=2)
 
         # Convert overlay image (bgr8) back to ROS Image
         try:
@@ -91,7 +103,6 @@ class CannyEdgeNode(Node):
         except CvBridgeError as e:
             self.get_logger().error(f'CvBridge Error: {e}')
             return
-
         # Keep the same header (time/frame)
         edge_msg.header = msg.header
 

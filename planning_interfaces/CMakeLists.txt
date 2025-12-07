@@ -14,6 +14,7 @@ find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/PickPlaceService.srv"
   "srv/MoveToTarget.srv"
+  "srv/ContinuousPickPlace.srv"
   DEPENDENCIES geometry_msgs
 )
 

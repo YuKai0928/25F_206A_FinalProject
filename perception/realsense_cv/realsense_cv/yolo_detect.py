@@ -22,7 +22,7 @@ class YOLO5BoxTFBroadcaster(Node):
         self.declare_parameter("model_path", "box_detector_yolov5n.pt")
         self.declare_parameter("camera_frame", "camera_color_optical_frame")
         self.declare_parameter("box_frame", "detected_box")
-        self.declare_parameter("box_width_m", 0.10)
+        self.declare_parameter("box_width_m", 0.14)
         self.declare_parameter("output_image_topic", "/yolo/annotated")
 
         img_topic = self.get_parameter("input_image_topic").value
@@ -54,7 +54,7 @@ class YOLO5BoxTFBroadcaster(Node):
             "ultralytics/yolov5",
             "custom",
             path=model_path,
-            force_reload=False
+            force_reload=True
         ).to(self.device)
 
         # Subscribers

@@ -18,21 +18,12 @@ class HSVTunerNode(Node):
         self.declare_parameter('output_image_topic', '/camera/hsv_tuner_debug')
 
         # One HSV range that you will tune to include yellow + orange
-        # self.declare_parameter('lower_h', 3)
-        # self.declare_parameter('lower_s', 130)
-        # self.declare_parameter('lower_v', 110)
-        # self.declare_parameter('upper_h', 15)
-        # self.declare_parameter('upper_s', 255)
-        # self.declare_parameter('upper_v', 255)
-        self.declare_parameter('lower_h', 172)
-        self.declare_parameter('lower_s', 120)
-        self.declare_parameter('lower_v', 160)
-        self.declare_parameter('upper_h', 177)
-        self.declare_parameter('upper_s', 160)
-        self.declare_parameter('upper_v', 210)
-
-
-        
+        self.declare_parameter('lower_h', 3)
+        self.declare_parameter('lower_s', 130)
+        self.declare_parameter('lower_v', 110)
+        self.declare_parameter('upper_h', 15)
+        self.declare_parameter('upper_s', 255)
+        self.declare_parameter('upper_v', 255)
 
         input_topic = self.get_parameter('input_image_topic').get_parameter_value().string_value
         output_topic = self.get_parameter('output_image_topic').get_parameter_value().string_value
