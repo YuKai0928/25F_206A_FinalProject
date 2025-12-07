@@ -50,7 +50,7 @@ class PickAndPlace(Node):
             JointState,
             '/joint_states',
             self.joint_state_callback,
-            10
+            1
         )
 
         # Action client for trajectory execution
@@ -101,6 +101,36 @@ class PickAndPlace(Node):
         self.processing = False
 
         self.get_logger().info('Ready! Pick-and-Place node initialized')
+    def normalize_quaternion(self, quat):
+        """
+        Normalize a quaternion to ensure it has unit length.
+
+        Args:
+            quat: Array-like [x, y, z, w] or geometry_msgs Quaternion
+
+        Returns:
+            Normalized quaternion as numpy array [x, y, z, w]
+        """
+        if hasattr(quat, 'x'):
+            # geometry_msgs.msg.Quaternion
+            q = np.array([quat.x, quat.y, quat.z, quat.w])
+        else:
+            q = np.array(quat)
+
+        norm = np.linalg.norm(q)
+        if norm < 1e-10:
+            self.get_logger().warn('Quaternion norm too small, using identity quaternion')
+            return np.array([0.0, 0.0, 0.0, 1.0])
+
+        return q / norm
+
+    def print_joint_state(self, prev_js,js):
+        self.get_logger().info('prev Joint State:')
+        for n,p in zip(prev_js.name,prev_js.position):
+            self.get_logger().info(f'  {n}: {p:.4f}')
+        self.get_logger().info('new Joint State:')
+        for n,p in zip(js.name,js.position):
+            self.get_logger().info(f'  {n}: {p:.4f}')
 
     def joint_state_callback(self, msg):
         """Store latest joint state"""
@@ -116,6 +146,13 @@ class PickAndPlace(Node):
         self.processing = True
 
         try:
+            # Normalize target pose quaternion
+            target_quat_norm = self.normalize_quaternion(request.target_pose.pose.orientation)
+            request.target_pose.pose.orientation.x = target_quat_norm[0]
+            request.target_pose.pose.orientation.y = target_quat_norm[1]
+            request.target_pose.pose.orientation.z = target_quat_norm[2]
+            request.target_pose.pose.orientation.w = target_quat_norm[3]
+
             success = await self.move_to_target(request.target_pose)
             response.success = success
             response.message = "Success" if success else "Failed to reach target"
@@ -145,7 +182,20 @@ class PickAndPlace(Node):
         try:
             pick_pose = request.pick_pose
             place_pose = request.place_pose
-            
+
+            # Normalize quaternions for pick and place poses
+            pick_quat_norm = self.normalize_quaternion(pick_pose.pose.orientation)
+            pick_pose.pose.orientation.x = pick_quat_norm[0]
+            pick_pose.pose.orientation.y = pick_quat_norm[1]
+            pick_pose.pose.orientation.z = pick_quat_norm[2]
+            pick_pose.pose.orientation.w = pick_quat_norm[3]
+
+            place_quat_norm = self.normalize_quaternion(place_pose.pose.orientation)
+            place_pose.pose.orientation.x = place_quat_norm[0]
+            place_pose.pose.orientation.y = place_quat_norm[1]
+            place_pose.pose.orientation.z = place_quat_norm[2]
+            place_pose.pose.orientation.w = place_quat_norm[3]
+
             self.get_logger().info('='*60)
             self.get_logger().info('Starting Pick and Place (IK-based)')
             self.get_logger().info(f'Pick:  x={pick_pose.pose.position.x:.3f}, '
@@ -161,6 +211,7 @@ class PickAndPlace(Node):
 
             # 1. Compute IK for pick approach
             self.get_logger().info('Step 1/8: Computing IK for pick approach...')
+            
             pick_approach = self.get_approach_pose(pick_pose)
             ik_result = self.ik_planner.compute_ik(
                 self.current_joint_state,
@@ -314,14 +365,27 @@ class PickAndPlace(Node):
         
         self.processing = True
         slides_picked = 0
-        
+
         # Extract parameters
         pick_scan = request.pick_scan_pose
         place_scan = request.place_scan_pose
         pick_dist = request.pick_distance
         retreat_dist = request.retreat_distance
         place_dist = request.place_distance
-        
+
+        # Normalize quaternions for scan poses
+        pick_scan_quat_norm = self.normalize_quaternion(pick_scan.pose.orientation)
+        pick_scan.pose.orientation.x = pick_scan_quat_norm[0]
+        pick_scan.pose.orientation.y = pick_scan_quat_norm[1]
+        pick_scan.pose.orientation.z = pick_scan_quat_norm[2]
+        pick_scan.pose.orientation.w = pick_scan_quat_norm[3]
+
+        place_scan_quat_norm = self.normalize_quaternion(place_scan.pose.orientation)
+        place_scan.pose.orientation.x = place_scan_quat_norm[0]
+        place_scan.pose.orientation.y = place_scan_quat_norm[1]
+        place_scan.pose.orientation.z = place_scan_quat_norm[2]
+        place_scan.pose.orientation.w = place_scan_quat_norm[3]
+
         self.get_logger().info('='*60)
         self.get_logger().info('CONTINUOUS PICK-AND-PLACE STARTED')
         self.get_logger().info('='*60)
@@ -605,7 +669,10 @@ class PickAndPlace(Node):
         flange_rot_mat = np.column_stack([flange_x, flange_y, flange_z])
         flange_rot = R.from_matrix(flange_rot_mat)
         flange_quat = flange_rot.as_quat()  # [x, y, z, w]
-        
+
+        # Normalize quaternion
+        flange_quat_norm = self.normalize_quaternion(flange_quat)
+
         # Build pose
         align_pose = PoseStamped()
         align_pose.header.frame_id = 'base'
@@ -613,11 +680,11 @@ class PickAndPlace(Node):
         align_pose.pose.position.x = slide_pose.pose.position.x
         align_pose.pose.position.y = slide_pose.pose.position.y
         align_pose.pose.position.z = current_z  # Use current Z
-        align_pose.pose.orientation.x = flange_quat[0]
-        align_pose.pose.orientation.y = flange_quat[1]
-        align_pose.pose.orientation.z = flange_quat[2]
-        align_pose.pose.orientation.w = flange_quat[3]
-        
+        align_pose.pose.orientation.x = flange_quat_norm[0]
+        align_pose.pose.orientation.y = flange_quat_norm[1]
+        align_pose.pose.orientation.z = flange_quat_norm[2]
+        align_pose.pose.orientation.w = flange_quat_norm[3]
+
         return align_pose
     
     def offset_pose_z(self, pose, delta_z):
@@ -654,6 +721,8 @@ class PickAndPlace(Node):
                 # Execute trajectory
                 if not await self.execute_trajectory(trajectory.joint_trajectory):
                     return False
+                
+                self.print_joint_state(self.current_joint_state, job)
                     
             elif job == 'close_gripper':
                 self.get_logger().info('Closing gripper...')
