@@ -17,6 +17,7 @@ from realsense_cv.slide_detector import SlideDetector
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import asyncio
+import time
 
 
 class PickAndPlace(Node):
@@ -107,7 +108,7 @@ class PickAndPlace(Node):
 
         Args:
             quat: Array-like [x, y, z, w] or geometry_msgs Quaternion
-
+f
         Returns:
             Normalized quaternion as numpy array [x, y, z, w]
         """
@@ -412,7 +413,7 @@ class PickAndPlace(Node):
                     return response
                 
                 # Brief pause for camera/marker detection to stabilize
-                await asyncio.sleep(0.5)
+                time.sleep(0.5)
                 
                 # ========================================
                 # STEP 2: Detect slide
@@ -580,7 +581,7 @@ class PickAndPlace(Node):
                     self.get_logger().error('Execution failed for this slide')
                 
                 # Brief pause before next slide
-                await asyncio.sleep(1.0)
+                time.sleep(1.0)
             
             # All done
             self.get_logger().info('='*60)
