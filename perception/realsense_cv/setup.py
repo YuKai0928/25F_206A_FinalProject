@@ -20,10 +20,12 @@ setup(
     entry_points={
         'console_scripts': [
             'edge_node=realsense_cv.edge_detect:main',
+            'edge_tune=realsense_cv.edge_tune:main',
             'hsv_tuning=realsense_cv.hsv_tune:main',
             'marker_node=realsense_cv.marker_detect:main',
             'yolo_node=realsense_cv.yolo_detect:main',
             'slide_detector=realsense_cv.slide_detector:main',
+            'gsam_slide_detect=realsense_cv.gsam_slide_detect:main',
         ],
     },
 )
