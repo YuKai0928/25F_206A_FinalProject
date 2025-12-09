@@ -32,7 +32,7 @@ class SlideDetector(Node):
         self.get_logger().info('Slide Detector initialized')
         self.get_logger().info(f'Monitoring slide indices: {self.slide_indices}')
     
-    def wait_for_slide(self, timeout=5.0):
+    def wait_for_slide(self, timeout=10.0):
         """
         Wait at current position for slide TF frame to appear.
         Scans for slide frames and returns first unpicked slide found.
@@ -48,7 +48,10 @@ class SlideDetector(Node):
         self.get_logger().info('Scanning for slides...')
         
         while (time.time() - start_time) < timeout:
+            self.get_logger().info('In the while loop')
+            self.get_logger().info(f'Slide indices: {self.slide_indices}')
             for idx in self.slide_indices:
+                self.get_logger().info('In the for loop')
                 # Skip already picked slides
                 if idx in self.picked_slides:
                     continue
@@ -63,6 +66,7 @@ class SlideDetector(Node):
                         rclpy.time.Time(),
                         timeout=rclpy.duration.Duration(seconds=0.1)
                     )
+                    print(f"Transform found for {slide_frame}")
                     
                     # Convert to PoseStamped
                     pose = PoseStamped()

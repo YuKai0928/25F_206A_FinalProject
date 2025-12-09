@@ -419,7 +419,7 @@ f
                 # STEP 2: Detect slide
                 # ========================================
                 self.get_logger().info('Step 2: Detecting slide...')
-                slide_pose = self.slide_detector.wait_for_slide(timeout=3.0)
+                slide_pose = self.slide_detector.wait_for_slide(timeout=10.0)
                 
                 if slide_pose is None:
                     self.get_logger().info('No more slides detected - operation complete')
@@ -843,6 +843,7 @@ def main(args=None):
     
     node.executor = executor
     executor.add_node(node)
+    executor.add_node(node.slide_detector)  # Add SlideDetector to executor for TF callbacks
 
     try:
         executor.spin()

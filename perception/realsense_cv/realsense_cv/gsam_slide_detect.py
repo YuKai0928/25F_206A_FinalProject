@@ -35,8 +35,8 @@ class GSAMSlideDetectNode(Node):
         self.declare_parameter('service_name', '/detect_slides')
         self.declare_parameter('grounding_model', "IDEA-Research/grounding-dino-tiny")
         self.declare_parameter('text_prompt', "colored box.")
-        self.declare_parameter('sam2_checkpoint', "./models/sam2.1_hiera_large.pt")
-        self.declare_parameter('sam2_model_config', "configs/sam2.1/sam2.1_hiera_l.yaml")
+        self.declare_parameter('sam2_checkpoint', "./models/sam2.1_hiera_small.pt")
+        self.declare_parameter('sam2_model_config', "configs/sam2.1/sam2.1_hiera_s.yaml")
         self.declare_parameter('force_cpu', False)
 
         # Get parameters

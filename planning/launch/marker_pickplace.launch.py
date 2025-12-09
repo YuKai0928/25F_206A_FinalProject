@@ -35,15 +35,7 @@ def generate_launch_description():
         description='Serial port for Arduino gripper controller'
     )
     gripper_port = LaunchConfiguration('gripper_port')
-    
-    # Slide indices to detect
-    slide_indices_arg = DeclareLaunchArgument(
-        'slide_indices',
-        default_value='[8, 18]',
-        description='List of slide indices to detect (slot positions)'
-    )
-    slide_indices = LaunchConfiguration('slide_indices')
-    
+
     # =========================================================================
     # CAMERA: RealSense D435i
     # =========================================================================
@@ -57,7 +49,7 @@ def generate_launch_description():
             )
         ),
         launch_arguments={
-            'rgb_camera.color_profile': '1280x720x30',
+            'rgb_camera.color_profile': '1920x1080x30',
         }.items(),
     )
     
@@ -109,20 +101,6 @@ def generate_launch_description():
     )
     
     # =========================================================================
-    # PERCEPTION: Slide Detector
-    # =========================================================================
-    
-    slide_detector_node = Node(
-        package='realsense_cv',
-        executable='slide_detector',
-        name='slide_detector',
-        output='screen',
-        parameters=[{
-            'slide_indices': slide_indices,
-        }]
-    )
-    
-    # =========================================================================
     # EVENT HANDLERS
     # =========================================================================
     
@@ -140,16 +118,14 @@ def generate_launch_description():
     return LaunchDescription([
         # Arguments
         gripper_port_arg,
-        slide_indices_arg,
-        
+
         # Nodes
         realsense_launch,
         camera_tf_node,
         marker_detect_node,
         gripper_node,
         pick_and_place_node,
-        slide_detector_node,
-        
+
         # Event handlers
         shutdown_on_any_exit,
     ])
