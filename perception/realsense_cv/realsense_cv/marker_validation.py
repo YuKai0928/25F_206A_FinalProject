@@ -208,6 +208,7 @@ class ArucoTFBroadcaster(Node):
 
         # Pose estimate
         rvecs, tvecs, _ = self.estimatePoseSingleMarkers(ids, corners)
+        # self.get_logger().info(f"Detected markers: {tvecs[0].flatten()}")
         # print(rvecs.shape,tvecs.shape)
         ids = ids.flatten()
         annotated = cv_image.copy()
@@ -255,8 +256,12 @@ class ArucoTFBroadcaster(Node):
             tfmsg.transform.rotation.w = float(qw)
             
             self.br.sendTransform(tfmsg)
-            for slotInd in range(8,25,10):# generate 2 slide frame for test usage
-                self.pseudo_slide_frames(Rmat,tvec,slotInd,msg)
+            for slotInd in range(21,25,10):# generate 2 slide frame for test usage
+                R_pn, T_pn = self.pseudo_slide_frames(Rmat,tvec,slotInd,msg)
+
+                self.get_logger().info(f"Detected markers: {T_pn.flatten()}")
+                
+                # self.pseudo_slide_frames(Rmat,tvec,slotInd,msg)
 
             break
         
