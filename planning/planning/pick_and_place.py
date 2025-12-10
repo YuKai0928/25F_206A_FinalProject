@@ -9,7 +9,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from planning_interfaces.srv import PickPlaceService, MoveToTarget, ContinuousPickPlace
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 import tf2_ros
 from tf2_ros import TransformException
 
@@ -20,7 +20,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import asyncio
 import time
-
+import re
 
 class PickAndPlace(Node):
     def __init__(self):
@@ -48,6 +48,16 @@ class PickAndPlace(Node):
         self.declare_parameter('alignment_method', 'perpendicular')
         self.alignment_method = self.get_parameter('alignment_method').value
         self.get_logger().info(f'Alignment method: {self.alignment_method}')
+
+        # Detection mode selection
+        self.declare_parameter('detection_mode', 'marker')  # 'marker' or 'gsam'
+        self.detection_mode = self.get_parameter('detection_mode').value
+        self.get_logger().info(f'Detection mode: {self.detection_mode}')
+        
+        # Validate detection mode (Only marker or gsam currently supported)
+        if self.detection_mode not in ['marker', 'gsam']:
+            self.get_logger().error(f'Invalid detection_mode: {self.detection_mode}')
+            raise ValueError(f'Invalid detection_mode: {self.detection_mode}')
 
         # Callback group
         self.callback_group = ReentrantCallbackGroup()
@@ -95,6 +105,20 @@ class PickAndPlace(Node):
         else:
             self.get_logger().info('Connected to gripper controller')
 
+        # GSAM detection service client
+        if self.detection_mode == 'gsam':
+            self.gsam_client = self.create_client(
+                Trigger,
+                '/detect_slides',
+                callback_group=self.callback_group
+            )
+            self.get_logger().info('Waiting for GSAM slide detection service...')
+            if not self.gsam_client.wait_for_service(timeout_sec=10.0):
+                self.get_logger().error('GSAM service not available!')
+                raise RuntimeError('GSAM service /detect_slides not available')
+            else:
+                self.get_logger().info('Connected to GSAM slide detector')
+
         # Service for pick and place
         self.pick_place_srv = self.create_service(
             PickPlaceService,
@@ -122,6 +146,50 @@ class PickAndPlace(Node):
         self.processing = False
 
         self.get_logger().info('Ready! Pick-and-Place node initialized')
+
+    async def detect_slides_gsam(self):
+        """
+        Call GSAM service to detect slides in storage box.
+        
+        Returns:
+            List of slot numbers (e.g., [3, 7, 12, 18]), or empty list if failed
+        """
+        try:
+            request = Trigger.Request()
+            
+            self.get_logger().info('Calling GSAM slide detection service...')
+            future = self.gsam_client.call_async(request)
+            response = await future
+            
+            if not response.success:
+                self.get_logger().error(f'GSAM detection failed: {response.message}')
+                return []
+            
+            # Parse response message
+            # Format: "Detected slides at slots: [3, 7, 12, 18]"
+            self.get_logger().info(f'GSAM result: {response.message}')
+            
+            match = re.search(r'\[([\d, ]+)\]', response.message)
+            if match:
+                numbers_str = match.group(1).strip()
+                if numbers_str:
+                    slot_numbers = [int(x.strip()) for x in numbers_str.split(',')]
+                    self.get_logger().info(f'Detected slides in {len(slot_numbers)} slots: {slot_numbers}')
+                    return slot_numbers
+                else:
+                    # Empty brackets []
+                    self.get_logger().info('No slides detected (empty box)')
+                    return []
+            else:
+                self.get_logger().warn('Could not parse slot numbers from GSAM response')
+                return []
+                
+        except Exception as e:
+            self.get_logger().error(f'Exception calling GSAM service: {e}')
+            import traceback
+            traceback.print_exc()
+            return []
+
     def normalize_quaternion(self, quat):
         """
         Normalize a quaternion to ensure it has unit length.
@@ -377,11 +445,13 @@ f
         if self.processing:
             response.success = False
             response.message = "Already processing"
+            response.slides_picked = 0
             return response
         
         if self.current_joint_state is None:
             response.success = False
             response.message = "No joint state available"
+            response.slides_picked = 0
             return response
         
         self.processing = True
@@ -411,13 +481,59 @@ f
         self.get_logger().info('='*60)
         self.get_logger().info('CONTINUOUS PICK-AND-PLACE STARTED')
         self.get_logger().info('='*60)
+        self.get_logger().info(f'Detection mode: {self.detection_mode.upper()}')
+        self.get_logger().info(f'Alignment method: {self.alignment_method}')
         self.get_logger().info(f'Pick distance: {pick_dist}m (TODO: TUNE)')
         self.get_logger().info(f'Retreat distance: {retreat_dist}m (TODO: TUNE)')
         self.get_logger().info(f'Place distance: {place_dist}m (TODO: TUNE)')
         self.get_logger().info(f'Place rotation (Y-axis): {place_rotation_y}° (TODO: TUNE)')
         self.get_logger().info('='*60)
-        
+
         try:
+            # ========================================
+            # GSAM MODE: Call detection service once
+            # ========================================
+            if self.detection_mode == 'gsam':
+                self.get_logger().info('')
+                self.get_logger().info('='*60)
+                self.get_logger().info('STEP 1: Move to pick scan pose for GSAM detection')
+                self.get_logger().info('='*60)
+                
+                if not await self.move_to_target(pick_scan, velocity_scale=self.xy_vel_scale, acceleration_scale=self.xy_accel_scale):
+                    response.success = False
+                    response.message = "Failed to reach pick scan pose"
+                    response.slides_picked = 0
+                    return response
+                
+                # Brief pause for camera to stabilize
+                time.sleep(0.5)
+                
+                # Call GSAM detection
+                self.get_logger().info('='*60)
+                self.get_logger().info('STEP 2: Calling GSAM detection')
+                self.get_logger().info('='*60)
+                
+                detected_slots = await self.detect_slides_gsam()
+                
+                if not detected_slots:
+                    self.get_logger().info('No slides detected by GSAM - operation complete')
+                    response.success = True
+                    response.message = "No slides detected"
+                    response.slides_picked = 0
+                    self.processing = False
+                    return response
+                
+                # Update slide detector with detected slot numbers
+                self.slide_detector.set_slide_indices(detected_slots)
+                self.get_logger().info(f'GSAM detected slides in slots: {detected_slots}')
+                self.get_logger().info(f'Will process {len(detected_slots)} slides')
+                
+                # Wait a moment for TF frames to be published
+                time.sleep(0.2)
+            
+            # ========================================
+            # MAIN LOOP: Pick each detected slide
+            # ========================================
             while True:
                 self.get_logger().info('')
                 self.get_logger().info('='*60)
@@ -425,22 +541,23 @@ f
                 self.get_logger().info('='*60)
                 
                 # ========================================
-                # STEP 1: Move to pick scan pose
+                # MARKER MODE: Move to scan pose each cycle
                 # ========================================
-                self.get_logger().info('Step 1: Moving to pick scan pose...')
-                if not await self.move_to_target(pick_scan, velocity_scale=self.xy_vel_scale, acceleration_scale=self.xy_accel_scale):
-                    response.success = False
-                    response.message = "Failed to reach pick scan pose"
-                    response.slides_picked = slides_picked
-                    return response
+                if self.detection_mode == 'marker':
+                    self.get_logger().info('Step 1: Moving to pick scan pose...')
+                    if not await self.move_to_target(pick_scan, velocity_scale=self.xy_vel_scale, acceleration_scale=self.xy_accel_scale):
+                        response.success = False
+                        response.message = "Failed to reach pick scan pose"
+                        response.slides_picked = slides_picked
+                        return response
+                    
+                    # Brief pause for camera/marker detection to stabilize
+                    time.sleep(0.5)
                 
-                # Brief pause for camera/marker detection to stabilize
-                time.sleep(0.5)
-                
                 # ========================================
-                # STEP 2: Detect slide
+                # DETECT SLIDE (both modes use slide_detector)
                 # ========================================
-                self.get_logger().info('Step 2: Detecting slide...')
+                self.get_logger().info(f'Step 2: Detecting slide (mode: {self.detection_mode})...')
                 slide_pose = self.slide_detector.wait_for_slide(timeout=10.0)
                 
                 if slide_pose is None:
@@ -459,10 +576,15 @@ f
                 job_queue = []
                 current_state = self.current_joint_state
                 
-                # Job 1: Align with slide (XY + orientation, keep current Z from pick_scan_pose)
-                self.get_logger().info('  Job 1/9: Computing align pose ...')
-                align_pose = self.compute_alignment_pose(slide_pose)
+                # ========================================
+                # Job 1: Align with slide
+                # Use direct method for GSAM, perpendicular for marker (or as configured)
+                # ========================================
+                alignment_method = 'direct' if self.detection_mode == 'gsam' else self.alignment_method
+                self.get_logger().info(f'  Job 1/9: Computing align pose (method: {alignment_method})...')
                 
+                align_pose = self.compute_alignment_pose(slide_pose, method=alignment_method)
+                                
                 ik_align = self.ik_planner.compute_ik(
                     current_state,
                     align_pose.pose.position.x,

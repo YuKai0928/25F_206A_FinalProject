@@ -13,8 +13,12 @@ class SlideDetector(Node):
     Helper node to detect slides from TF frames.
     Monitors slide_XX frames and returns poses in base frame.
     Tracks which slides have been picked to avoid duplicates.
+
+    Supports both:
+      - Marker detection (slide indices set via parameter)
+      - GSAM detection (slide indices set dynamically via set_slide_indices())
     """
-    
+
     def __init__(self):
         super().__init__('slide_detector')
         
@@ -31,7 +35,20 @@ class SlideDetector(Node):
         
         self.get_logger().info('Slide Detector initialized')
         self.get_logger().info(f'Monitoring slide indices: {self.slide_indices}')
-    
+
+    def set_slide_indices(self, indices):
+        """
+        Set the slide indices to monitor (for GSAM mode).
+
+        Args:
+            indices: List of slot numbers (e.g., [3, 7, 12, 18])
+        """
+        self.slide_indices = indices
+        self.get_logger().info(f'Slide indices updated to: {self.slide_indices}')
+        # Reset picked slides when indices change
+        self.picked_slides.clear()
+        self.get_logger().info('Picked slides reset')
+
     def wait_for_slide(self, timeout=10.0):
         """
         Wait at current position for slide TF frame to appear.
@@ -46,7 +63,9 @@ class SlideDetector(Node):
         start_time = time.time()
         
         self.get_logger().info('Scanning for slides...')
-        
+        self.get_logger().info(f'Looking for slide indices: {self.slide_indices}')
+        self.get_logger().info(f'Already picked: {self.picked_slides}')
+
         while (time.time() - start_time) < timeout:
             self.get_logger().info('In the while loop')
             self.get_logger().info(f'Slide indices: {self.slide_indices}')
@@ -77,12 +96,12 @@ class SlideDetector(Node):
                     pose.pose.position.z = transform.transform.translation.z
                     pose.pose.orientation = transform.transform.rotation
                     
-                    self.get_logger().info(f'Found slide_{idx:02d} at ({pose.pose.position.x:.3f}, '
+                    self.get_logger().info(f'✓ Found slide_{idx:02d} at ({pose.pose.position.x:.3f}, '
                                          f'{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})')
                     
                     # Mark as picked
                     self.picked_slides.add(idx)
-                    
+                    self.get_logger().info(f'Marked slide {idx} as picked. Total picked: {len(self.picked_slides)}')                    
                     return pose
                     
                 except TransformException:

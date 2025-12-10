@@ -25,7 +25,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import Image, CameraInfo
 from std_srvs.srv import Trigger
-from tf2_ros import TransformBroadcaster
+from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 
 import math
 
@@ -91,7 +91,7 @@ class GSAMSlideDetectNode(Node):
         info_topic = self.get_parameter('camera_info_topic').value
 
 
-        self.br = TransformBroadcaster(self)
+        self.br = StaticTransformBroadcaster(self)
 
         self.last_image = None
         self.last_msg = None
