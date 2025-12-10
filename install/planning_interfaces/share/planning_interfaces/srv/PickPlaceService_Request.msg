@@ -1,2 +1,0 @@
-geometry_msgs/PoseStamped pick_pose
-geometry_msgs/PoseStamped place_pose
