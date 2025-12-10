@@ -1,6 +1,7 @@
 
 import sys
-sys.path.append('Grounded-SAM-2')
+# print("Current sys.path:", sys.path)
+# sys.path.append('')
 
 import argparse
 import os
@@ -15,15 +16,51 @@ from supervision.draw.color import ColorPalette
 from utils.supervision_utils import CUSTOM_COLOR_MAP
 from PIL import Image as PILImage
 from sam2.build_sam import build_sam2
+from geometry_msgs.msg import TransformStamped
+
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 import rclpy
 from rclpy.node import Node
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from std_srvs.srv import Trigger
+from tf2_ros import TransformBroadcaster
 
 import math
+
+
+def rotation_matrix_to_quaternion(R):
+    q = np.empty((4,), dtype=np.float64)
+    trace = np.trace(R)
+
+    if trace > 0.0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        q[3] = 0.25 / s
+        q[0] = (R[2, 1] - R[1, 2]) * s
+        q[1] = (R[0, 2] - R[2, 0]) * s
+        q[2] = (R[1, 0] - R[0, 1]) * s
+    else:
+        if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            q[3] = (R[2, 1] - R[1, 2]) / s
+            q[0] = 0.25 * s
+            q[1] = (R[0, 1] + R[1, 0]) / s
+            q[2] = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            q[3] = (R[0, 2] - R[2, 0]) / s
+            q[0] = (R[0, 1] + R[1, 0]) / s
+            q[1] = 0.25 * s
+            q[2] = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            q[3] = (R[1, 0] - R[0, 1]) / s
+            q[0] = (R[0, 2] + R[2, 0]) / s
+            q[1] = (R[1, 2] + R[2, 1]) / s
+            q[2] = 0.25 * s
+
+    return q[0], q[1], q[2], q[3]
 
 class GSAMSlideDetectNode(Node):
     def __init__(self):
@@ -32,10 +69,12 @@ class GSAMSlideDetectNode(Node):
         # Declare parameters
         self.declare_parameter('input_image_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('output_image_topic', '/camera/edges_overlay')
+        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter('camera_frame', 'camera_color_optical_frame')
         self.declare_parameter('service_name', '/detect_slides')
         self.declare_parameter('grounding_model', "IDEA-Research/grounding-dino-tiny")
         self.declare_parameter('text_prompt', "colored box.")
-        self.declare_parameter('sam2_checkpoint', "./models/sam2.1_hiera_small.pt")
+        self.declare_parameter('sam2_checkpoint', "/home/bryan/final_project_ws/src/perception/realsense_cv/models/sam2.1_hiera_small.pt")
         self.declare_parameter('sam2_model_config', "configs/sam2.1/sam2.1_hiera_s.yaml")
         self.declare_parameter('force_cpu', False)
 
@@ -44,12 +83,22 @@ class GSAMSlideDetectNode(Node):
         self.text_prompt = self.get_parameter('text_prompt').value
         self.sam2_checkpoint = self.get_parameter('sam2_checkpoint').value
         self.sam2_model_config = self.get_parameter('sam2_model_config').value
+        self.camera_frame = self.get_parameter('camera_frame').value
         force_cpu = self.get_parameter('force_cpu').value
         input_topic = self.get_parameter('input_image_topic').value
         output_topic = self.get_parameter('output_image_topic').value
         service_name = self.get_parameter('service_name').value
+        info_topic = self.get_parameter('camera_info_topic').value
+
+
+        self.br = TransformBroadcaster(self)
 
         self.last_image = None
+        self.last_msg = None
+
+        self.camera_matrix = None
+        self.caminfo_sub = self.create_subscription(CameraInfo, info_topic, self.camera_info_callback, 10)
+
         self.processing_image = False
         self.device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
         self.get_logger().info(f'Using device: {self.device}')
@@ -81,6 +130,11 @@ class GSAMSlideDetectNode(Node):
 
         self.get_logger().info(f'GSAM Slide Detect Service initialized at {service_name}')
 
+    def camera_info_callback(self, msg: CameraInfo):
+        if self.camera_matrix is None:
+            self.camera_matrix = np.array(msg.k).reshape(3, 3)
+            self.dist_coeffs = np.array(msg.d)
+            self.get_logger().info("Camera intrinsics received")
     def ros_image_to_cv2(self, msg: Image):
         """
         Convert ROS Image message to OpenCV image without using CvBridge
@@ -115,6 +169,7 @@ class GSAMSlideDetectNode(Node):
         if self.processing_image is False:
             # Store the last image for service processing
             self.last_image = cv_image
+            self.last_msg = msg
 
     def detect_slides_service_callback(self, request, response):
         """
@@ -184,7 +239,22 @@ class GSAMSlideDetectNode(Node):
             kernels.append(kernel)
 
         return kernels
+    
+    
+    def deproject_pixel_to_3d(self,point):
+        u, v = point
+        K = self.camera_matrix
+        if K is None:
+            raise ValueError("Camera intrinsic matrix K is not set.")
+        fx = K[0, 0]; fy = K[1, 1]
+        cx = K[0, 2]; cy = K[1, 2]
 
+        Z = 0.288
+        X = (u - cx) * Z / fx
+        Y = (v - cy) * Z / fy 
+
+        return X, Y, Z
+    
     def gsam_mask(self, image, text=None):
         # build SAM2 image predictor
         sam2_checkpoint = self.sam2_checkpoint
@@ -277,7 +347,7 @@ class GSAMSlideDetectNode(Node):
         lines = cv2.HoughLines(img, 1, np.pi/180, threshold=120)
 
         if lines is None:
-            return np.zeros_like(img).astype(np.bool)
+            return np.zeros_like(img).astype(bool)
 
         # Calculate the reference angle from p1 to p2
         p1, p2, _, _ = points
@@ -332,7 +402,72 @@ class GSAMSlideDetectNode(Node):
             cv2.line(output, (x1, y1), (x2, y2), 255, 1)
 
         cv2.imwrite("filtered_edges.png", output)
-        return output.astype(np.bool)
+        return output.astype(bool)
+
+    def publish_slide_frames(self, points, slotInd, msg=None):
+        
+        """
+        Parent -> Child: (R_pc, t_pc)
+        Child  -> New : (R_cn, t_cn)
+
+        Returns Parent -> New: (R_pn, t_pn)
+        """
+        p1 = np.array(points[0], dtype=np.float64)
+        p2 = np.array(points[1], dtype=np.float64)
+        p3 = np.array(points[2], dtype=np.float64)  # not used here, but you can if you prefer
+        if msg is None:
+            msg = self.last_msg
+        v_short = p2 - p1                     # [dx, dy]
+        v_short3 = np.array([v_short[0], v_short[1], 0.0], dtype=np.float64)
+        e_short = v_short3 / np.linalg.norm(v_short3)
+        # long_side = np.linalg.norm(np.array(p3)-np.array(p1))
+        z_cam = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        e_long = np.cross(e_short, z_cam)     # or np.cross(e_short, z_cam) depending on handedness
+        e_long /= np.linalg.norm(e_long)
+
+        R_box_cam = np.column_stack((e_long, e_short, z_cam))
+        T_box_cam = (p1+p2)/2
+        T_slide_box = np.array([
+            -0.00528*slotInd-0.01,
+            0.0,
+            0.0,
+        ], dtype=np.float64)
+        t_pn = R_box_cam @ T_slide_box + T_box_cam   # shape (3,)
+        R_pn = R_box_cam
+
+        # Convert to quaternion
+        qx, qy, qz, qw = rotation_matrix_to_quaternion(R_pn)
+
+        # Build and send TF
+        tfmsg = TransformStamped()
+        tfmsg.header.stamp = msg.header.stamp
+        tfmsg.header.frame_id = self.camera_frame
+        tfmsg.child_frame_id = f"slide_{slotInd:02d}"
+
+        tfmsg.transform.translation.x = float(t_pn[0])
+        tfmsg.transform.translation.y = float(t_pn[1])
+        tfmsg.transform.translation.z = float(t_pn[2])
+
+        tfmsg.transform.rotation.x = float(qx)
+        tfmsg.transform.rotation.y = float(qy)
+        tfmsg.transform.rotation.z = float(qz)
+        tfmsg.transform.rotation.w = float(qw)
+
+        self.br.sendTransform(tfmsg)
+        return R_pn, t_pn
+    @staticmethod
+    def slide_ind_post_process(detected_slides):
+        # Remove slides that are too close to each other (within 2 slots), will filter out the latter one
+        filtered_slides = []
+        i=0
+        while i < len(detected_slides):
+            filtered_slides.append(detected_slides[i])
+            j = i + 1
+            while j < len(detected_slides) and detected_slides[j] <= detected_slides[i] + 2:
+                j += 1
+            i = j
+        
+        return filtered_slides
 
     def detect_slides(self, img, text_prompt=None, slide_thrd=100):
         """
@@ -362,19 +497,16 @@ class GSAMSlideDetectNode(Node):
         # --------
         # scan slides
 
-        points = []
-
-        for i in range(4):
-            pt1 = rectangles[0][i][0]
-            points.append(pt1)
+        points = [rectangles[0][i][0] for i in range(4)]
         points = self.sort_points(points)
-        kernels = self.yukai_kernel(points)
+        spatial_points = [self.deproject_pixel_to_3d(pt) for pt in points]
 
+        kernels = self.yukai_kernel(points)
 
         # 1. Smooth (reduces noise → better edges)
         blur = cv2.GaussianBlur(img, (5, 5), 1.4)
 
-        # 2. Canny edge detection
+        # 2. Canny edge detection TODO: tune thresholds
         low_thresh  = 40
         high_thresh = 120
         edges = cv2.Canny(blur, low_thresh, high_thresh)
@@ -388,6 +520,9 @@ class GSAMSlideDetectNode(Node):
 
         results = []
         for i, kernel in enumerate(kernels):
+            if i in [0,1,23,24]: # skip edge slots
+                results.append(0)
+                continue
             kernel_bool = kernel>1e-6
             intersection_count = np.count_nonzero(kernel_bool & edges_bool)
             results.append(intersection_count)
@@ -416,7 +551,10 @@ class GSAMSlideDetectNode(Node):
             if is_peak and val>slide_thrd:
                 self.get_logger().info(f"Slide detected at slot {i+1}")
                 detected_slides.append(i+1)
-        
+        detected_slides = self.slide_ind_post_process(detected_slides)
+        for ind in detected_slides:
+            self.publish_slide_frames(spatial_points, ind+1)
+
         return detected_slides
 
 

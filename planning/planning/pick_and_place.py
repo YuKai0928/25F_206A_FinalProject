@@ -10,6 +10,8 @@ from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from planning_interfaces.srv import PickPlaceService, MoveToTarget, ContinuousPickPlace
 from std_srvs.srv import SetBool
+import tf2_ros
+from tf2_ros import TransformException
 
 from planning.ik import IKPlanner
 from realsense_cv.slide_detector import SlideDetector
@@ -44,6 +46,11 @@ class PickAndPlace(Node):
         # Slide Detector
         self.slide_detector = SlideDetector()
         self.get_logger().info('Slide Detector initialized')
+
+        # TF listener for robot state queries
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.get_logger().info('TF listener initialized')
 
         # Joint state tracking
         self.current_joint_state = None
@@ -622,16 +629,16 @@ f
         # ADDED: Get current Z from robot TF if not provided
         if current_z is None:
             try:
-                transform = self.ik_planner.tf_buffer.lookup_transform(
+                transform = self.tf_buffer.lookup_transform(
                     'base',
                     'link_6',
                     rclpy.time.Time()
                 )
                 current_z = transform.transform.translation.z
                 self.get_logger().info(f'Using current Z height: {current_z:.3f}m')
-            except:
-                self.get_logger().warn('Cannot get current Z, using slide Z + 0.1m as fallback')
-                current_z = slide_pose.pose.position.z + 0.10
+            except (TransformException, AttributeError) as e:
+                self.get_logger().error(f'FATAL: Cannot get current Z position from TF: {e}')
+                raise RuntimeError(f'Failed to lookup transform base->link_6: {e}')
         
         # Extract slide orientation
         slide_quat = np.array([
