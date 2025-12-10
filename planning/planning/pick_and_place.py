@@ -36,6 +36,11 @@ class PickAndPlace(Node):
         self.base_frame = self.get_parameter('base_frame').value
         self.approach_distance = self.get_parameter('approach_distance').value
 
+        # Alignment method selection
+        self.declare_parameter('alignment_method', 'perpendicular')
+        self.alignment_method = self.get_parameter('alignment_method').value
+        self.get_logger().info(f'Alignment method: {self.alignment_method}')
+
         # Callback group
         self.callback_group = ReentrantCallbackGroup()
 
@@ -613,22 +618,30 @@ f
         
         return response
 
-    # MODIFIED: Updated function signature and implementation
-    def compute_alignment_pose(self, slide_pose, current_z=None):
+    def compute_alignment_pose(self, slide_pose, current_z=None, method=None):
         """
         Compute flange pose aligned with slide.
-        
+
         Position: slide XY, keep current Z height (from pick_scan_pose)
-        Orientation: Y-axis parallel to slide X-axis, Z-axis points down
-        
+
         Args:
             slide_pose: PoseStamped of detected slide
             current_z: Current Z height (if None, gets from robot TF)
-            
+            method: Alignment method ('perpendicular' or 'direct')
+                    If None, uses self.alignment_method parameter
+
+        Methods:
+            'perpendicular' -> Flange Y aligned with Slide X
+            'direct' - Flange X -> Slide X, Flange Y -> Slide Y
+
         Returns:
             PoseStamped for flange alignment pose
         """
-        # ADDED: Get current Z from robot TF if not provided
+        # Use parameter if method not specified
+        if method is None:
+            method = self.alignment_method
+
+        # Get current Z from robot TF if not provided
         if current_z is None:
             try:
                 transform = self.tf_buffer.lookup_transform(
@@ -641,7 +654,7 @@ f
             except (TransformException, AttributeError) as e:
                 self.get_logger().error(f'FATAL: Cannot get current Z position from TF: {e}')
                 raise RuntimeError(f'Failed to lookup transform base->link_6: {e}')
-        
+
         # Extract slide orientation
         slide_quat = np.array([
             slide_pose.pose.orientation.x,
@@ -649,36 +662,70 @@ f
             slide_pose.pose.orientation.z,
             slide_pose.pose.orientation.w
         ])
-        
+
         slide_rot = R.from_quat(slide_quat)
-        slide_x_axis = slide_rot.as_matrix()[:, 0]  # First column = X-axis
-        
-        # Build flange orientation
-        # Z-axis: pointing down (world -Z)
+        slide_matrix = slide_rot.as_matrix()
+        slide_x_axis = slide_matrix[:, 0]  # First column = X-axis
+        slide_y_axis = slide_matrix[:, 1]  # Second column = Y-axis
+
+        # Z-axis: always pointing down (both methods)
         flange_z = np.array([0, 0, -1])
-        
-        # Y-axis: aligned with slide X-axis, projected to horizontal
-        flange_y = slide_x_axis.copy()
-        flange_y[2] = 0.0  # Project to XY plane
-        
-        norm_y = np.linalg.norm(flange_y)
-        if norm_y < 1e-6:
-            # Slide is vertical - fall back to world Y
-            flange_y = np.array([0, 1, 0])
-        else:
-            flange_y /= norm_y
-        
-        # X-axis: Y cross Z (right-hand rule)
-        flange_x = np.cross(flange_y, flange_z)
-        flange_x /= np.linalg.norm(flange_x)
-        
-        # Recompute Y to ensure orthogonality
-        flange_y = np.cross(flange_z, flange_x)
-        
+
+        # Compute flange axes based on method
+        if method == 'direct':
+            # DIRECT: Flange X->Slide X, Flange Y->Slide Y
+            self.get_logger().debug('Using DIRECT alignment')
+
+            # X-axis: aligned with slide X-axis, projected to horizontal
+            flange_x = slide_x_axis.copy()
+            flange_x[2] = 0.0
+            norm_x = np.linalg.norm(flange_x)
+            if norm_x < 1e-6:
+                self.get_logger().warn('Slide X-axis vertical, using world X fallback')
+                flange_x = np.array([1, 0, 0])
+            else:
+                flange_x /= norm_x
+
+            # Y-axis: aligned with slide Y-axis, projected to horizontal
+            flange_y = slide_y_axis.copy()
+            flange_y[2] = 0.0
+            norm_y = np.linalg.norm(flange_y)
+            if norm_y < 1e-6:
+                self.get_logger().warn('Slide Y-axis vertical, computing from X and Z')
+                flange_y = np.cross(flange_z, flange_x)
+            else:
+                flange_y /= norm_y
+
+            # Re-orthogonalize
+            flange_x = np.cross(flange_y, flange_z)
+            flange_x /= np.linalg.norm(flange_x)
+            flange_y = np.cross(flange_z, flange_x)
+
+        else:  # 'perpendicular' (default)
+            # PERPENDICULAR: Flange Y->Slide X
+            self.get_logger().debug('Using PERPENDICULAR alignment')
+
+            # Y-axis: aligned with slide X-axis, projected to horizontal
+            flange_y = slide_x_axis.copy()
+            flange_y[2] = 0.0
+            norm_y = np.linalg.norm(flange_y)
+            if norm_y < 1e-6:
+                self.get_logger().warn('Slide X-axis vertical, using world Y fallback')
+                flange_y = np.array([0, 1, 0])
+            else:
+                flange_y /= norm_y
+
+            # X-axis: Y cross Z (right-hand rule)
+            flange_x = np.cross(flange_y, flange_z)
+            flange_x /= np.linalg.norm(flange_x)
+
+            # Recompute Y to ensure orthogonality
+            flange_y = np.cross(flange_z, flange_x)
+
         # Build rotation matrix
         flange_rot_mat = np.column_stack([flange_x, flange_y, flange_z])
         flange_rot = R.from_matrix(flange_rot_mat)
-        flange_quat = flange_rot.as_quat()  # [x, y, z, w]
+        flange_quat = flange_rot.as_quat()
 
         # Normalize quaternion
         flange_quat_norm = self.normalize_quaternion(flange_quat)
@@ -689,7 +736,7 @@ f
         align_pose.header.stamp = self.get_clock().now().to_msg()
         align_pose.pose.position.x = slide_pose.pose.position.x
         align_pose.pose.position.y = slide_pose.pose.position.y
-        align_pose.pose.position.z = current_z  # Use current Z
+        align_pose.pose.position.z = current_z
         align_pose.pose.orientation.x = flange_quat_norm[0]
         align_pose.pose.orientation.y = flange_quat_norm[1]
         align_pose.pose.orientation.z = flange_quat_norm[2]
