@@ -108,7 +108,7 @@ class IKPlanner(Node):
         self.get_logger().info('FK solution found.')
         return result.pose_stamped[0]  # Return first pose (link_6)
 
-    def plan_to_joints(self, target_joint_state, start_joint_state=None, custom_joint_limits=None, goal_tolerance=0.01):
+    def plan_to_joints(self, target_joint_state, start_joint_state=None, custom_joint_limits=None, goal_tolerance=0.01, velocity_scale=0.2, acceleration_scale=0.2):
         """
         Plan motion to joint configuration for TM12
 
@@ -135,8 +135,9 @@ class IKPlanner(Node):
             req.motion_plan_request.start_state.is_diff = True
 
         # velocity and acceleration scaling
-        req.motion_plan_request.max_velocity_scaling_factor = 0.2
-        req.motion_plan_request.max_acceleration_scaling_factor = 0.2   
+        req.motion_plan_request.max_velocity_scaling_factor = velocity_scale
+        req.motion_plan_request.max_acceleration_scale_factor = acceleration_scale
+        self.get_logger().info(f'Planning with velocity={velocity_scale*100:.0f}%, accel={acceleration_scale*100:.0f}%')
 
         # Apply joint limits as path constraints
         if limits:

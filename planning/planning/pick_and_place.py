@@ -31,10 +31,18 @@ class PickAndPlace(Node):
         self.declare_parameter('end_effector_link', 'link_6')
         self.declare_parameter('base_frame', 'base')
         self.declare_parameter('approach_distance', 0.1)
+        self.declare_parameter('z_velocity_scale', 0.2) # Slow, safe
+        self.declare_parameter('xy_velocity_scale', 0.4) # Moderate
+        self.declare_parameter('z_acceleration_scale', 0.2)
+        self.declare_parameter('xy_acceleration_scale', 0.4)
         self.planning_group = self.get_parameter('planning_group').value
         self.end_effector_link = self.get_parameter('end_effector_link').value
         self.base_frame = self.get_parameter('base_frame').value
         self.approach_distance = self.get_parameter('approach_distance').value
+        self.z_vel_scale = self.get_parameter('z_velocity_scale').value
+        self.xy_vel_scale = self.get_parameter('xy_velocity_scale').value
+        self.z_accel_scale = self.get_parameter('z_acceleration_scale').value
+        self.xy_accel_scale = self.get_parameter('xy_acceleration_scale').value
 
         # Alignment method selection
         self.declare_parameter('alignment_method', 'perpendicular')
@@ -166,7 +174,7 @@ f
             request.target_pose.pose.orientation.z = target_quat_norm[2]
             request.target_pose.pose.orientation.w = target_quat_norm[3]
 
-            success = await self.move_to_target(request.target_pose)
+            success = await self.move_to_target(request.target_pose, velocity_scale=self.xy_vel_scale, acceleration_scale=self.xy_accel_scale)
             response.success = success
             response.message = "Success" if success else "Failed to reach target"
         except Exception as e:
@@ -420,7 +428,7 @@ f
                 # STEP 1: Move to pick scan pose
                 # ========================================
                 self.get_logger().info('Step 1: Moving to pick scan pose...')
-                if not await self.move_to_target(pick_scan):
+                if not await self.move_to_target(pick_scan, velocity_scale=self.xy_vel_scale, acceleration_scale=self.xy_accel_scale):
                     response.success = False
                     response.message = "Failed to reach pick scan pose"
                     response.slides_picked = slides_picked
@@ -468,7 +476,7 @@ f
                 if ik_align is None:
                     self.get_logger().error('IK failed for align pose - skipping this slide')
                     continue
-                job_queue.append(ik_align)
+                job_queue.append((ik_align, self.xy_vel_scale, self.xy_accel_scale))
                 current_state = ik_align
                 
                 # Job 2: Lower for grasp
@@ -488,7 +496,7 @@ f
                 if ik_lower is None:
                     self.get_logger().error('IK failed for lower pose - skipping this slide')
                     continue
-                job_queue.append(ik_lower)
+                job_queue.append((ik_lower, self.z_vel_scale, self.z_accel_scale))
                 current_state = ik_lower
                 
                 # Job 3: Close gripper
@@ -512,7 +520,7 @@ f
                 if ik_lift is None:
                     self.get_logger().error('IK failed for lift pose - skipping this slide')
                     continue
-                job_queue.append(ik_lift)
+                job_queue.append((ik_lift, self.xy_vel_scale, self.xy_accel_scale))
                 current_state = ik_lift
                 
                 # Job 5: Move to place scan pose
@@ -530,7 +538,7 @@ f
                 if ik_place_scan is None:
                     self.get_logger().error('IK failed for place scan pose - skipping this slide')
                     continue
-                job_queue.append(ik_place_scan)
+                job_queue.append((ik_place_scan, self.xy_vel_scale, self.xy_accel_scale))
                 current_state = ik_place_scan
                 
                 # Job 6: Align with target (for now, same as place_scan)
@@ -554,7 +562,7 @@ f
                 if ik_place_lower is None:
                     self.get_logger().error('IK failed for place lower - skipping this slide')
                     continue
-                job_queue.append(ik_place_lower)
+                job_queue.append((ik_place_lower, self.z_vel_scale, self.z_accel_scale))
                 current_state = ik_place_lower
                 
                 # Job 8: Open gripper
@@ -578,7 +586,7 @@ f
                 if ik_final_lift is None:
                     self.get_logger().error('IK failed for final lift - skipping this slide')
                     continue
-                job_queue.append(ik_final_lift)
+                job_queue.append((ik_final_lift, self.xy_vel_scale, self.xy_accel_scale))
                 
                 # ========================================
                 # EXECUTE QUEUE
@@ -792,23 +800,40 @@ f
         return new_pose
 
     async def execute_job_queue(self, job_queue):
-        """Execute all jobs in the queue"""
+        """Execute all jobs in the queue with configurable speeds"""
         for i, job in enumerate(job_queue):
             self.get_logger().info(f'Executing job {i+1}/{len(job_queue)}...')
-            
-            if isinstance(job, JointState):
-                # Plan to joint configuration
+
+            # Handle tuple (JointState, velocity, acceleration)
+            if isinstance(job, tuple) and len(job) == 3:
+                joint_state, vel_scale, accel_scale = job
+
+                trajectory = self.ik_planner.plan_to_joints(
+                    joint_state,
+                    velocity_scale=vel_scale,
+                    acceleration_scale=accel_scale
+                )
+                if trajectory is None:
+                    self.get_logger().error('Planning failed')
+                    return False
+
+                if not await self.execute_trajectory(trajectory.joint_trajectory):
+                    return False
+
+                self.print_joint_state(self.current_joint_state, joint_state)
+
+            # Handle old-style JointState (backwards compatibility)
+            elif isinstance(job, JointState):
                 trajectory = self.ik_planner.plan_to_joints(job)
                 if trajectory is None:
                     self.get_logger().error('Planning failed')
                     return False
-                
-                # Execute trajectory
+
                 if not await self.execute_trajectory(trajectory.joint_trajectory):
                     return False
-                
+
                 self.print_joint_state(self.current_joint_state, job)
-                    
+                   
             elif job == 'close_gripper':
                 self.get_logger().info('Closing gripper...')
                 if not await self.control_gripper(True):
@@ -868,7 +893,7 @@ f
         approach.pose.orientation = target_pose.pose.orientation
         return approach
 
-    async def move_to_target(self, target_pose):
+    async def move_to_target(self, target_pose, velocity_scale=0.2, acceleration_scale=0.2):
         """Move end effector to target position using IK"""
         if self.current_joint_state is None:
             self.get_logger().error('No joint state available')
@@ -880,6 +905,7 @@ f
             self.get_logger().info(f'Target: x={target_pose.pose.position.x:.3f}, '
                                  f'y={target_pose.pose.position.y:.3f}, '
                                  f'z={target_pose.pose.position.z:.3f}')
+            self.get_logger().info(f'Speed: velocity={velocity_scale*100:.0f}%, accel={acceleration_scale*100:.0f}%')
             self.get_logger().info('='*60)
 
             # Compute IK for target position
@@ -901,7 +927,7 @@ f
 
             # Plan to joint configuration
             self.get_logger().info('Planning trajectory...')
-            trajectory = self.ik_planner.plan_to_joints(ik_result)
+            trajectory = self.ik_planner.plan_to_joints(ik_result, velocity_scale=velocity_scale, acceleration_scale=acceleration_scale)
             if trajectory is None:
                 self.get_logger().error('Planning failed')
                 return False
