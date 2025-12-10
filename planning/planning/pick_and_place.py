@@ -380,6 +380,7 @@ f
         pick_dist = request.pick_distance
         retreat_dist = request.retreat_distance
         place_dist = request.place_distance
+        place_rotation_y = request.place_rotation_y_deg
 
         # Normalize quaternions for scan poses
         pick_scan_quat_norm = self.normalize_quaternion(pick_scan.pose.orientation)
@@ -400,6 +401,7 @@ f
         self.get_logger().info(f'Pick distance: {pick_dist}m (TODO: TUNE)')
         self.get_logger().info(f'Retreat distance: {retreat_dist}m (TODO: TUNE)')
         self.get_logger().info(f'Place distance: {place_dist}m (TODO: TUNE)')
+        self.get_logger().info(f'Place rotation (Y-axis): {place_rotation_y}° (TODO: TUNE)')
         self.get_logger().info('='*60)
         
         try:
@@ -531,8 +533,8 @@ f
                 # Already there from job 5
                 
                 # Job 7: Lower for place
-                self.get_logger().info(f'  Job 7/9: Computing place lower ({place_dist}m) - TODO: TUNE')
-                place_lower_pose = self.offset_pose_z(place_scan, -place_dist)
+                self.get_logger().info(f'  Job 7/9: Computing place lower ({place_dist}m, rot={place_rotation_y}°) - TODO: TUNE')
+                place_lower_pose = self.offset_pose_z(place_scan, -place_dist, rotation_y_deg=place_rotation_y)
                 
                 ik_place_lower = self.ik_planner.compute_ik(
                     current_state,
@@ -695,23 +697,51 @@ f
 
         return align_pose
     
-    def offset_pose_z(self, pose, delta_z):
+    def offset_pose_z(self, pose, delta_z, rotation_y_deg=0.0):
         """
-        Create new pose with Z offset.
-        
+        Create new pose with Z offset and optional rotation around flange Y-axis.
+
         Args:
             pose: Original PoseStamped
             delta_z: Z offset in meters (positive = up, negative = down)
-            
+            rotation_y_deg: Rotation around flange Y-axis in degrees (default: 0.0)
+
         Returns:
-            New PoseStamped with Z offset applied
+            New PoseStamped with Z offset and rotation applied
         """
         new_pose = PoseStamped()
         new_pose.header = pose.header
         new_pose.pose.position.x = pose.pose.position.x
         new_pose.pose.position.y = pose.pose.position.y
         new_pose.pose.position.z = pose.pose.position.z + delta_z
-        new_pose.pose.orientation = pose.pose.orientation
+
+        # If no rotation, just copy orientation
+        if abs(rotation_y_deg) < 1e-6:
+            new_pose.pose.orientation = pose.pose.orientation
+        else:
+            # Get original orientation
+            orig_quat = np.array([
+                pose.pose.orientation.x,
+                pose.pose.orientation.y,
+                pose.pose.orientation.z,
+                pose.pose.orientation.w
+            ])
+            orig_rot = R.from_quat(orig_quat)
+
+            # Create rotation around Y-axis (in flange frame)
+            delta_rot = R.from_euler('y', rotation_y_deg, degrees=True)
+
+            # Apply rotation: new = original * delta (right multiply for local frame rotation)
+            new_rot = orig_rot * delta_rot
+            new_quat = new_rot.as_quat()
+
+            # Normalize and set
+            new_quat_norm = self.normalize_quaternion(new_quat)
+            new_pose.pose.orientation.x = new_quat_norm[0]
+            new_pose.pose.orientation.y = new_quat_norm[1]
+            new_pose.pose.orientation.z = new_quat_norm[2]
+            new_pose.pose.orientation.w = new_quat_norm[3]
+
         return new_pose
 
     async def execute_job_queue(self, job_queue):
@@ -739,6 +769,8 @@ f
                     return False
 
             elif job == 'open_gripper':
+                self.get_logger().info('Waiting 500ms before opening gripper...')
+                time.sleep(0.5)  # 500ms delay to let slide settle
                 self.get_logger().info('Opening gripper...')
                 if not await self.control_gripper(False):
                     self.get_logger().error('Failed to open gripper')

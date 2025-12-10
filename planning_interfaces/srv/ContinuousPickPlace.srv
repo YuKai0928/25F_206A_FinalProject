@@ -9,6 +9,7 @@ geometry_msgs/PoseStamped place_scan_pose  # Flange pose to see target plate
 float32 pick_distance  # Distance to lower for grasp
 float32 retreat_distance   # Distance to lift after grasp
 float32 place_distance     # Distance to lower for place
+float32 place_rotation_y_deg  # Rotation around flange Y-axis for placement (degrees)
 
 ---
 bool success
