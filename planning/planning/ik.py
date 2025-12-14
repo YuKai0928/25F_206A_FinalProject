@@ -25,13 +25,13 @@ class IKPlanner(Node):
 
         # ---- Default joint limits for TM12 ----
         self.default_joint_limits = {
-            # 'joint_6': (math.radians(36), math.radians(254)),  # Limit joint_2
+            'joint_6': (math.radians(36), math.radians(254)),  # Limit joint_2
             # # Add more if needed:
-            # 'joint_1': (math.radians(-67), math.radians(48)),
-            # 'joint_5': (math.radians(60), math.radians(110)),
-            # 'joint_2': (math.radians(-31), math.radians(65)),
-            # 'joint_3': (math.radians(44), math.radians(154)),
-            # 'joint_4': (math.radians(-110), math.radians(-6)),
+            'joint_1': (math.radians(-67), math.radians(48)),
+            'joint_5': (math.radians(60), math.radians(110)),
+            'joint_2': (math.radians(-31), math.radians(65)),
+            'joint_3': (math.radians(44), math.radians(154)),
+            'joint_4': (math.radians(-110), math.radians(-6)),
         }
 
     def compute_ik(self, current_joint_state, x, y, z,
@@ -108,7 +108,7 @@ class IKPlanner(Node):
         self.get_logger().info('FK solution found.')
         return result.pose_stamped[0]  # Return first pose (link_6)
 
-    def plan_to_joints(self, target_joint_state, start_joint_state=None, custom_joint_limits=None, goal_tolerance=0.01, velocity_scale=0.2, acceleration_scale=0.2):
+    def plan_to_joints(self, target_joint_state, start_joint_state=None, custom_joint_limits=None, goal_tolerance=0.01, velocity_scale=0.2):
         """
         Plan motion to joint configuration for TM12
 
@@ -136,8 +136,7 @@ class IKPlanner(Node):
 
         # velocity and acceleration scaling
         req.motion_plan_request.max_velocity_scaling_factor = velocity_scale
-        req.motion_plan_request.max_acceleration_scale_factor = acceleration_scale
-        self.get_logger().info(f'Planning with velocity={velocity_scale*100:.0f}%, accel={acceleration_scale*100:.0f}%')
+        self.get_logger().info(f'Planning with velocity={velocity_scale*100:.0f}%')
 
         # Apply joint limits as path constraints
         if limits:

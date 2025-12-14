@@ -25,7 +25,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import Image, CameraInfo
 from std_srvs.srv import Trigger
-from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
+from tf2_ros import TransformBroadcaster
 
 import math
 
@@ -91,10 +91,19 @@ class GSAMSlideDetectNode(Node):
         info_topic = self.get_parameter('camera_info_topic').value
 
 
-        self.br = StaticTransformBroadcaster(self)
+        self.br = TransformBroadcaster(self)
 
         self.last_image = None
         self.last_msg = None
+
+        # Storage for detected slide transforms
+        self.stored_transforms = {}  # {slot_num: TransformStamped}
+        
+        # Timer to continuously publish stored transforms
+        self.tf_publish_timer = self.create_timer(
+            0.1,  # 10 Hz
+            self.publish_stored_transforms_callback
+        )
 
         self.camera_matrix = None
         self.caminfo_sub = self.create_subscription(CameraInfo, info_topic, self.camera_info_callback, 10)
@@ -351,7 +360,7 @@ class GSAMSlideDetectNode(Node):
 
         # Calculate the reference angle from p1 to p2
         p1, p2, _, _ = points
-        dx = p2[0] - p1[0]
+        dx = p2[0] - p1[0] 
         dy = p2[1] - p1[1]
 
         # Calculate angle in radians (note: cv2 uses angle from x-axis)
@@ -453,8 +462,39 @@ class GSAMSlideDetectNode(Node):
         tfmsg.transform.rotation.z = float(qz)
         tfmsg.transform.rotation.w = float(qw)
 
+        # Store transform for continuous publishing
+        self.stored_transforms[slotInd] = tfmsg
+        self.get_logger().info(f'Stored transform for slide_{slotInd:02d}')
+        
+        # Publish immediately
         self.br.sendTransform(tfmsg)
+        
         return R_pn, t_pn
+    
+    def publish_stored_transforms_callback(self):
+        """
+        Timer callback to continuously publish stored slide transforms.
+        Called at 10 Hz to keep TF frames alive.
+        """
+        if not self.stored_transforms:
+            return  # No transforms to publish
+        
+        current_time = self.get_clock().now().to_msg()
+        
+        for slot_num, tfmsg in self.stored_transforms.items():
+            # Update timestamp to current time
+            tfmsg.header.stamp = current_time
+            
+            # Publish transform
+            self.br.sendTransform(tfmsg)
+    
+    def clear_stored_transforms(self):
+        """
+        Clear stored transforms (call this when starting new detection).
+        """
+        self.stored_transforms.clear()
+        self.get_logger().info('Cleared all stored transforms')
+    
     @staticmethod
     def slide_ind_post_process(detected_slides):
         # Remove slides that are too close to each other (within 2 slots), will filter out the latter one
@@ -483,6 +523,9 @@ class GSAMSlideDetectNode(Node):
         """
         if text_prompt is None:
             text_prompt = self.text_prompt
+
+        # Clear previous transforms
+        self.clear_stored_transforms()
 
         test_image = "yellow"
         mask = self.gsam_mask(img, text=text_prompt)
@@ -553,7 +596,7 @@ class GSAMSlideDetectNode(Node):
                 detected_slides.append(i+1)
         detected_slides = self.slide_ind_post_process(detected_slides)
         for ind in detected_slides:
-            self.publish_slide_frames(spatial_points, ind+1)
+            self.publish_slide_frames(spatial_points, ind)
 
         return detected_slides
 

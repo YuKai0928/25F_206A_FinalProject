@@ -56,7 +56,7 @@ def generate_launch_description():
             )
         ),
         launch_arguments={
-            'rgb_camera.color_profile': '1920x1080x30',
+            'rgb_camera.color_profile': '1280x720x30',
         }.items(),
     )
     
