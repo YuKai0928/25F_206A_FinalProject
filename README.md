@@ -435,4 +435,4 @@ See individual package.xml files for license information.
 
 ---
 
-**Note**: This project was developed as part of the EECS 206A course at UC Berkeley in collaboration with Ember Robotics. For more detailed information about the project, please refer to the [project presentation slides](https://docs.google.com/presentation/d/1IEKUIgCwdznhzMRzVUyWATOjx524NDUfZrOHgApcxFs/edit?usp=sharing).
+**Note**: This project was developed as part of the EECS 206A course at UC Berkeley in collaboration with Ember Robotics. For more detailed information about the project, please refer to the [project website](https://bryan1203.github.io/UCB_206A_fp_webpage).
